@@ -30,19 +30,19 @@ jobs:
       - name: Build Debug APK
         run: |
           gradle assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk TurboMacro-v1.4.apk
+          cp app/build/outputs/apk/debug/app-debug.apk TurboMacro-v1.5.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TurboMacro-Debug-APK
-          path: TurboMacro-v1.4.apk
+          path: TurboMacro-v1.5.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.4.0
-          name: "TurboMacro v1.4.0（三角洲：按住悬浮钮开火 + 同时拖屏）"
-          body: "覆盖安装 `TurboMacro-v1.4.apk`。\n\n- 开火仍用悬浮按钮长按，不用音量键开火\n- 悬浮窗增加 FLAG_SPLIT_TOUCH：按住按钮时另一根手指可拖屏瞄准\n- Shizuku 短点注入（无 MOVE），减少对瞄准手势干扰\n- 音量+ 仅用于呼出编辑"
-          files: TurboMacro-v1.4.apk
+          tag_name: v1.5.0
+          name: "TurboMacro v1.5.0（严格多指共存审核版）"
+          body: "覆盖安装 `TurboMacro-v1.5.apk`。\n\n审核修复：\n1. 去掉战斗态全屏水波纹窗（HyperOS 上会干扰多指）\n2. 编辑条战斗态从 WindowManager 彻底移除（不只是 GONE）\n3. 开火注入改为 Shizuku `input tap`，不向物理触控屏塞 ACTION_DOWN（避免清掉走位/瞄准手指）\n4. 按住连发强制要求 Shizuku，禁止无障碍降级\n5. 保留 FLAG_SPLIT_TOUCH + 仅按钮区域可点"
+          files: TurboMacro-v1.5.apk

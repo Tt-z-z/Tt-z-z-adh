@@ -15,19 +15,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /**
- * 极速「按住执行、松开即停」状态机引擎
- *
- * 特点：
- * - 零延迟按下响应：ACTION_DOWN 当帧立即启动协程并触发首点
- * - 真实命中校验：只有底层真正把点击送进系统（injected == true）才渲染水波纹与震动，绝不「假特效空转」
- * - 毫秒级断触保障：AtomicBoolean + Coroutine Job 即时取消，松手 3ms 内终止一切输出
+ * 按住开火引擎（三角洲）：
+ * - 仅在 Shizuku 就绪时允许按住连发（无障碍会打断屏幕其他手指，一律拒绝）
+ * - 注入走 shell tap / 合成设备，不向物理触控屏塞 ACTION_DOWN
  */
 class HoldToRunMacroEngine(
     private val touchInjector: TouchInjector,
     private val hapticEngine: HapticEngine,
     private val onVisualRipple: (x: Float, y: Float, endX: Float?, endY: Float?) -> Unit,
     private val onRunStateChanged: (isRunning: Boolean) -> Unit,
-    private val onInjectionBlockedWarning: () -> Unit
+    private val onInjectionBlockedWarning: () -> Unit,
+    private val onRequireShizuku: () -> Unit = {}
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val isHolding = AtomicBoolean(false)
@@ -36,12 +34,16 @@ class HoldToRunMacroEngine(
 
     fun isRunning(): Boolean = isHolding.get()
 
-    /**
-     * 启动宏连发
-     */
     fun onTriggerPressDown(service: AccessibilityService?, profile: MacroProfile) {
         val stepsSnapshot = profile.steps.map { it.copy() }
         if (stepsSnapshot.isEmpty()) return
+
+        // 按住连发 + 同时走位/瞄准：必须 Shizuku。无障碍会 cancel 其他手指。
+        if (!touchInjector.isShizukuReady()) {
+            onRequireShizuku()
+            return
+        }
+
         if (!isHolding.compareAndSet(false, true)) return
 
         if (profile.enableHaptics) {
@@ -63,7 +65,6 @@ class HoldToRunMacroEngine(
                         val actualX = (step.x + offsetX).coerceAtLeast(1f)
                         val actualY = (step.y + offsetY).coerceAtLeast(1f)
 
-                        // 先触发视觉水波纹与线性马达，再执行高优先注入
                         if (profile.enableHaptics) {
                             hapticEngine.performMacroTick()
                         }
@@ -75,21 +76,16 @@ class HoldToRunMacroEngine(
                             }
                         }
 
-                        // Shizuku 按住连发：禁止降级无障碍（dispatchGesture 会打断游戏其他手指）
-                        // 无障碍点按模式：允许无障碍注入（此时手指已离开悬浮键）
-                        val shizukuActive = touchInjector.getActiveBackend() ==
-                            TouchInjector.ActiveBackend.SHIZUKU_INPUT_MANAGER
-                        val allowAccFallback = !shizukuActive
-
+                        // 严禁无障碍降级
                         val injectedOk = when (step.type) {
                             ActionType.TAP -> {
                                 touchInjector.injectTap(
                                     service = service,
                                     x = actualX,
                                     y = actualY,
-                                    holdMs = step.holdDurationMs,
+                                    holdMs = step.holdDurationMs.coerceIn(10L, 35L),
                                     isStillHoldingTrigger = { isHolding.get() && isActive },
-                                    allowAccessibilityFallback = allowAccFallback
+                                    allowAccessibilityFallback = false
                                 )
                             }
                             ActionType.SWIPE -> {
@@ -101,7 +97,7 @@ class HoldToRunMacroEngine(
                                     endY = (step.endY + offsetY).coerceAtLeast(1f),
                                     durationMs = step.holdDurationMs.coerceAtLeast(32L),
                                     isStillHoldingTrigger = { isHolding.get() && isActive },
-                                    allowAccessibilityFallback = allowAccFallback
+                                    allowAccessibilityFallback = false
                                 )
                             }
                         }
@@ -111,9 +107,9 @@ class HoldToRunMacroEngine(
                             onInjectionBlockedWarning()
                         }
 
-                        var waitRemaining = step.intervalAfterMs.coerceAtLeast(12L)
+                        var waitRemaining = step.intervalAfterMs.coerceAtLeast(16L)
                         while (waitRemaining > 0 && isHolding.get() && isActive) {
-                            val slice = minOf(waitRemaining, 3L)
+                            val slice = minOf(waitRemaining, 4L)
                             delay(slice)
                             waitRemaining -= slice
                         }
@@ -127,15 +123,10 @@ class HoldToRunMacroEngine(
         }
     }
 
-    /**
-     * 停止宏连发
-     */
     fun onTriggerReleaseUp(profile: MacroProfile) {
         if (!isHolding.compareAndSet(true, false)) return
-
         activeJob?.cancel()
         activeJob = null
-
         if (profile.enableHaptics) {
             hapticEngine.performTriggerUp()
         }

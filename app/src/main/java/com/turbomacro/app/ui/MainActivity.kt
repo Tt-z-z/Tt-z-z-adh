@@ -164,10 +164,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val guideText = TextView(this).apply {
-            text = "三角洲用法（按住悬浮钮连点开火）：\n" +
-                "1. 必须开 Shizuku +「USB 调试（安全设置）」：按住悬浮钮自动单点开火，另一只手可同时拖屏瞄准。\n" +
-                "2. 编辑靶点：按【音量+】或连点悬浮钮 3 下；把靶点拖到游戏开火键位置后锁定。\n" +
-                "3. 下方可调悬浮钮大小；仅开无障碍时系统会打断拖屏，打 FPS 请用 Shizuku。"
+            text = "三角洲（多指不受影响）：\n" +
+                "1. 必须 Shizuku +「USB 调试（安全设置）」——按住悬浮钮连点开火；走位/瞄准用其他手指，互不抢触控。\n" +
+                "2. 未开 Shizuku 时按住会直接拒绝（无障碍连发会清掉屏幕其他手指，已禁用）。\n" +
+                "3. 编辑：音量+ 或连点悬浮钮 3 下；靶点对准开火键后锁定。可调按钮大小。"
             setTextColor(Color.parseColor("#90A4AE"))
             textSize = 12.5f
             setPadding(0, dp(12), 0, 0)

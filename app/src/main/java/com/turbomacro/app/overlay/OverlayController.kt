@@ -119,7 +119,8 @@ class OverlayController private constructor(
         touchInjector = touchInjector,
         hapticEngine = hapticEngine,
         onVisualRipple = { x, y, endX, endY ->
-            rippleOverlay?.spawnRipple(x, y, endX, endY)
+            // 不用全屏悬浮层画波纹（小米上全屏窗会干扰多指）；只在触发钮上闪一下
+            mainHandler.post { triggerButton?.refreshVisualState() }
         },
         onRunStateChanged = { _ ->
             mainHandler.post {
@@ -130,7 +131,16 @@ class OverlayController private constructor(
             mainHandler.post {
                 Toast.makeText(
                     context,
-                    "提示：请确认已开启「TurboMacro 无障碍服务」或「授权 Shizuku」以使点击在游戏内生效",
+                    "点击注入失败：请确认 Shizuku 正在运行，且已打开「USB 调试（安全设置）」",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        },
+        onRequireShizuku = {
+            mainHandler.post {
+                Toast.makeText(
+                    context,
+                    "按住连发且不影响走位/瞄准：必须开启并授权 Shizuku（无障碍会打断其他手指）",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -144,26 +154,11 @@ class OverlayController private constructor(
         currentProfile = repository.loadProfile()
         isCombatLocked = true
 
-        // 1. 挂载全屏穿透水波纹层 (FLAG_NOT_TOUCHABLE 保证 100% 不拦截游戏点击)
-        val ripple = RippleFeedbackOverlayView(context)
-        val rippleLp = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            getOverlayWindowType(),
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            applyCutoutShortEdges(this)
-        }
-        windowManager.addView(ripple, rippleLp)
-        rippleOverlay = ripple
+        // 战斗态不挂全屏水波纹窗：HyperOS 上即使 FLAG_NOT_TOUCHABLE 的全屏悬浮层也会干扰多指分发
 
-        // 2. 挂载按住触发键（三角洲：按住连点开火，另一只手同时拖屏瞄准）
-        // FLAG_SPLIT_TOUCH 是关键：没有它时，手指按在悬浮钮上会导致游戏窗口收不到第二根手指，拖屏失灵
-        // FLAG_NOT_TOUCH_MODAL：按钮区域外的触控全部穿透到游戏
+        // 挂载按住触发键（三角洲：按住连点开火，其他手指照常走位/瞄准）
+        // FLAG_SPLIT_TOUCH：按住本钮时，屏幕其他区域的多指仍交给游戏
+        // FLAG_NOT_TOUCH_MODAL：只有按钮矩形吃触摸，外侧全部穿透
         val sizePx = dpToPx(currentProfile.triggerSizeDp.coerceIn(36, 96))
         val triggerLp = WindowManager.LayoutParams(
             sizePx,
@@ -221,19 +216,17 @@ class OverlayController private constructor(
         triggerButton = btn
         triggerParams = triggerLp
 
-        // 3. 准备编辑态胶囊条（战斗态下默认 GONE 完全隐身，按【音量+】键呼出）
-        attachMiniDock()
-        miniDockView?.visibility = View.GONE
-
-        // 4. 注册系统级「音量+」广播监听（即使不开无障碍也能 100% 捕获音量+）
+        // 编辑条战斗态不挂到 WindowManager（GONE 仍可能占窗影响触控），编辑时再 attach
+        // 音量+ 广播呼出编辑
         registerVolumeUpReceiver()
 
         isShowing = true
-        Toast.makeText(
-            context,
-            "按住悬浮钮=连点开火；另一只手可同时拖屏瞄准。编辑：音量+ 或连点悬浮钮3下",
-            Toast.LENGTH_LONG
-        ).show()
+        val tip = if (touchInjector.isShizukuReady()) {
+            "按住悬浮钮连点开火，其他手指可正常走位/瞄准。编辑：音量+ 或连点钮3下"
+        } else {
+            "尚未授权 Shizuku：按住开火会拒绝启动（否则会打断走位）。请先开 Shizuku"
+        }
+        Toast.makeText(context, tip, Toast.LENGTH_LONG).show()
     }
 
     /**
@@ -252,17 +245,18 @@ class OverlayController private constructor(
             triggerButton?.refreshVisualState()
 
             if (isCombatLocked) {
-                miniDockView?.visibility = View.GONE
+                // 彻底移出 WindowManager，避免残留窗口干扰多指
                 dismissStepInspectorPopup()
                 detachTargetEditor()
+                detachMiniDock()
                 repository.saveProfile(currentProfile)
                 hapticEngine.performTriggerUp()
-                Toast.makeText(context, "🔒 已锁定并隐藏编辑栏（按【音量+】可再次编辑）", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "🔒 已锁定（按【音量+】可再编辑）", Toast.LENGTH_SHORT).show()
             } else {
-                miniDockView?.visibility = View.VISIBLE
+                attachMiniDock()
                 attachTargetEditor()
                 hapticEngine.performTriggerDown()
-                Toast.makeText(context, "✏️ 已进入编辑模式（再按【音量+】锁定隐身）", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "✏️ 编辑模式（再按【音量+】锁定）", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -279,11 +273,17 @@ class OverlayController private constructor(
 
         triggerButton?.let { safeRemoveView(it) }
         triggerButton = null
+        triggerParams = null
 
-        miniDockView?.let { safeRemoveView(it) }
-        miniDockView = null
+        detachMiniDock()
 
         isShowing = false
+    }
+
+    private fun detachMiniDock() {
+        miniDockView?.let { safeRemoveView(it) }
+        miniDockView = null
+        miniDockParams = null
     }
 
     fun reloadProfileAndRefresh() {
@@ -336,6 +336,7 @@ class OverlayController private constructor(
 
     @SuppressLint("SetTextI18n")
     private fun attachMiniDock() {
+        if (miniDockView != null) return
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
