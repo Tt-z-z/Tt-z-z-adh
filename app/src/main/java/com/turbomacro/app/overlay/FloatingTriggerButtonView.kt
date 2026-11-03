@@ -10,21 +10,21 @@ import android.view.View
 import kotlin.math.abs
 
 /**
- * 小米 Game Turbo 风格悬浮触发键（幽灵微透胶囊 / 圆环）
+ * 小米 Game Turbo 风格悬浮触发键（幽灵微透圆环）
  *
- * 交互设计：
- * - 【战斗锁定模式 (locked = true)】：
- *    - 闲置时半透明（默认 35% 透明度），体积小巧（52dp），不挡游戏视野。
- *    - 手指触碰瞬间 (ACTION_DOWN) **0ms 立即触发宏连发**，同时外圈亮起青色呼吸光环并伴随微缩按压动效。
- *    - 手指抬起瞬间 (ACTION_UP / ACTION_CANCEL) **0ms 立即停止宏**，恢复微透隐身态。
- *
- * - 【布局编辑模式 (locked = false)】：
- *    - 可自由拖拽触发键到屏幕顺手位置（如大拇指热区、侧边肩键位）。
- *    - 轻点触发键可弹出快捷参数/录制面板。
+ * 【极其关键的底层防冲突机制】：
+ * - 当开启了 **Shizuku** 时：系统支持多窗口并发注入，手指 **按住触发键 (ACTION_DOWN) 立即连发，松手 (ACTION_UP) 立停**。
+ * - 当仅开启 **无障碍服务（未授权 Shizuku）** 时：
+ *   由于 Android 无障碍底层限制，只要你的物理手指还按在悬浮按钮上（占用着触控通道），
+ *   系统就会拒绝 `dispatchGesture` 向底下的游戏窗口注入点击（这就是为什么之前有水波纹特效但游戏内没反应）！
+ *   因此，在纯无障碍模式下，我们升级为 **「松手瞬间/轻点切换极速连发 + 按住期间智能短暂释放焦点」**：
+ *   - 轻点一下触发键（手指离开屏幕）-> 立即全速连点游戏！再碰一下触发键 -> 0ms 立即停止！
  */
 @SuppressLint("ViewConstructor")
 class FloatingTriggerButtonView(
     context: Context,
+    private val isShizukuModeProvider: () -> Boolean,
+    private val isMacroRunningProvider: () -> Boolean,
     private val onHoldStart: () -> Unit,
     private val onHoldEnd: () -> Unit,
     private val onDragMoved: (newX: Int, newY: Int) -> Unit,
@@ -40,7 +40,7 @@ class FloatingTriggerButtonView(
     var idleAlpha: Float = 0.38f
         set(value) {
             field = value.coerceIn(0.15f, 1.0f)
-            if (!isPressing) alpha = field
+            if (!isPressing && !isMacroRunningProvider()) alpha = field
         }
 
     private var isPressing = false
@@ -77,23 +77,27 @@ class FloatingTriggerButtonView(
         alpha = idleAlpha
     }
 
+    fun refreshVisualState() {
+        val active = isPressing || isMacroRunningProvider()
+        alpha = if (active) 0.92f else if (isLockedForCombat) idleAlpha else 0.85f
+        postInvalidateOnAnimation()
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         val cx = width / 2f
         val cy = height / 2f
         val radius = (minOf(width, height) / 2f) - 6f
 
-        // 按下时微缩 92% 模拟真实物理按键下沉感
-        val scale = if (isPressing) 0.91f else 1.0f
+        val active = isPressing || isMacroRunningProvider()
+        val scale = if (active) 0.91f else 1.0f
         canvas.save()
         canvas.scale(scale, scale, cx, cy)
 
-        // 背景深色半透底盘
         canvas.drawCircle(cx, cy, radius, bgPaint)
 
-        // 外环：战斗按住时高亮电光青，编辑模式为橙金提示色，待机为细青环
         when {
-            isPressing -> {
+            active -> {
                 ringPaint.color = Color.parseColor("#00FFAA")
                 ringPaint.strokeWidth = 7.5f
             }
@@ -108,10 +112,9 @@ class FloatingTriggerButtonView(
         }
         canvas.drawCircle(cx, cy, radius, ringPaint)
 
-        // 中心准星核或状态字
         if (isLockedForCombat) {
-            innerDotPaint.color = if (isPressing) Color.parseColor("#00FFAA") else Color.parseColor("#00E5FF")
-            canvas.drawCircle(cx, cy, if (isPressing) radius * 0.42f else radius * 0.26f, innerDotPaint)
+            innerDotPaint.color = if (active) Color.parseColor("#00FFAA") else Color.parseColor("#00E5FF")
+            canvas.drawCircle(cx, cy, if (active) radius * 0.42f else radius * 0.26f, innerDotPaint)
         } else {
             val fontMetrics = textPaint.fontMetrics
             val baseline = cy - (fontMetrics.ascent + fontMetrics.descent) / 2f
@@ -124,23 +127,47 @@ class FloatingTriggerButtonView(
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (isLockedForCombat) {
-            // 战斗锁定态：0ms 极速响应按住与松开，绝不判断拖拽以消除 TouchSlop 延迟
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> {
-                    isPressing = true
-                    alpha = 0.95f
-                    invalidate()
-                    onHoldStart()
-                    return true
-                }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (isPressing) {
-                        isPressing = false
-                        alpha = idleAlpha
-                        invalidate()
-                        onHoldEnd()
+            val shizukuMode = isShizukuModeProvider()
+            if (shizukuMode) {
+                // Shizuku 原生通道：真·按住连发，松开即停（多指零冲突）
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        isPressing = true
+                        refreshVisualState()
+                        onHoldStart()
+                        return true
                     }
-                    return true
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        if (isPressing) {
+                            isPressing = false
+                            onHoldEnd()
+                            refreshVisualState()
+                        }
+                        return true
+                    }
+                }
+            } else {
+                // 纯无障碍模式：
+                // 若正在运行宏，手指一碰触发键 (ACTION_DOWN) 0ms 立即停止！
+                // 若未运行宏，手指松开瞬间 (ACTION_UP) 立即无阻挡注入游戏点击！
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        isPressing = true
+                        if (isMacroRunningProvider()) {
+                            onHoldEnd()
+                        }
+                        refreshVisualState()
+                        return true
+                    }
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                        val wasRunning = isMacroRunningProvider()
+                        isPressing = false
+                        if (!wasRunning && event.actionMasked == MotionEvent.ACTION_UP) {
+                            onHoldStart()
+                        }
+                        refreshVisualState()
+                        return true
+                    }
                 }
             }
             return true

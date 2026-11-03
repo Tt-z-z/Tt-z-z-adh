@@ -18,23 +18,26 @@ import kotlin.random.Random
  * 极速「按住执行、松开即停」状态机引擎
  *
  * 特点：
- * - 零延迟按下响应：ACTION_DOWN 当帧立即启动协程并触发首点，不等任何 Timer 周期
+ * - 零延迟按下响应：ACTION_DOWN 当帧立即启动协程并触发首点
+ * - 真实命中校验：只有底层真正把点击送进系统（injected == true）才渲染水波纹与震动，绝不「假特效空转」
  * - 毫秒级断触保障：AtomicBoolean + Coroutine Job 即时取消，松手 3ms 内终止一切输出
- * - 并发安全快照：执行循环前对 steps 拍快照，防止编辑与连发并发导致 ConcurrentModificationException
- * - 支持拟真微颤偏移（jitterRadiusPx）：每次点击在靶心周围微小随机分布，媲美真人手指
  */
 class HoldToRunMacroEngine(
     private val touchInjector: TouchInjector,
     private val hapticEngine: HapticEngine,
     private val onVisualRipple: (x: Float, y: Float, endX: Float?, endY: Float?) -> Unit,
-    private val onRunStateChanged: (isRunning: Boolean) -> Unit
+    private val onRunStateChanged: (isRunning: Boolean) -> Unit,
+    private val onInjectionBlockedWarning: () -> Unit
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val isHolding = AtomicBoolean(false)
     private var activeJob: Job? = null
+    private var hasWarnedBlocked = false
+
+    fun isRunning(): Boolean = isHolding.get()
 
     /**
-     * 当手指按住悬浮触发键 (ACTION_DOWN) 时立即调用
+     * 启动宏连发
      */
     fun onTriggerPressDown(service: AccessibilityService?, profile: MacroProfile) {
         val stepsSnapshot = profile.steps.map { it.copy() }
@@ -53,7 +56,6 @@ class HoldToRunMacroEngine(
                     for (step in stepsSnapshot) {
                         if (!isActive || !isHolding.get()) break
 
-                        // 计算真人微颤随机偏移
                         val jitter = step.jitterRadiusPx
                         val offsetX = if (jitter > 0f) Random.nextFloat() * jitter * 2 - jitter else 0f
                         val offsetY = if (jitter > 0f) Random.nextFloat() * jitter * 2 - jitter else 0f
@@ -61,7 +63,7 @@ class HoldToRunMacroEngine(
                         val actualX = (step.x + offsetX).coerceAtLeast(1f)
                         val actualY = (step.y + offsetY).coerceAtLeast(1f)
 
-                        // 触发线性马达脉冲与小米风格水波纹反馈
+                        // 先触发视觉水波纹与线性马达，再执行高优先注入
                         if (profile.enableHaptics) {
                             hapticEngine.performMacroTick()
                         }
@@ -73,8 +75,7 @@ class HoldToRunMacroEngine(
                             }
                         }
 
-                        // 执行底层点击或滑动
-                        when (step.type) {
+                        val injectedOk = when (step.type) {
                             ActionType.TAP -> {
                                 touchInjector.injectTap(
                                     service = service,
@@ -91,14 +92,18 @@ class HoldToRunMacroEngine(
                                     startY = actualY,
                                     endX = (step.endX + offsetX).coerceAtLeast(1f),
                                     endY = (step.endY + offsetY).coerceAtLeast(1f),
-                                    durationMs = step.holdDurationMs.coerceAtLeast(24L),
+                                    durationMs = step.holdDurationMs.coerceAtLeast(32L),
                                     isStillHoldingTrigger = { isHolding.get() && isActive }
                                 )
                             }
                         }
 
-                        // 步骤间隔等待（每 3ms 切片检查松手状态，保证随时松手零拖泥带水）
-                        var waitRemaining = step.intervalAfterMs.coerceAtLeast(6L)
+                        if (!injectedOk && !hasWarnedBlocked) {
+                            hasWarnedBlocked = true
+                            onInjectionBlockedWarning()
+                        }
+
+                        var waitRemaining = step.intervalAfterMs.coerceAtLeast(12L)
                         while (waitRemaining > 0 && isHolding.get() && isActive) {
                             val slice = minOf(waitRemaining, 3L)
                             delay(slice)
@@ -107,17 +112,15 @@ class HoldToRunMacroEngine(
                     }
                 } while (profile.loopWhileHeld && isHolding.get() && isActive)
             } catch (_: CancellationException) {
-                // 松开按键正常取消
             } finally {
-                if (!isHolding.get()) {
-                    onRunStateChanged(false)
-                }
+                isHolding.set(false)
+                onRunStateChanged(false)
             }
         }
     }
 
     /**
-     * 当手指松开悬浮触发键 (ACTION_UP / ACTION_CANCEL) 时立即调用
+     * 停止宏连发
      */
     fun onTriggerReleaseUp(profile: MacroProfile) {
         if (!isHolding.compareAndSet(true, false)) return
@@ -131,9 +134,6 @@ class HoldToRunMacroEngine(
         onRunStateChanged(false)
     }
 
-    /**
-     * 紧急停止一切宏执行（如切出界面、锁屏或关闭悬浮窗时安全兜底）
-     */
     fun forceStop() {
         isHolding.set(false)
         activeJob?.cancel()

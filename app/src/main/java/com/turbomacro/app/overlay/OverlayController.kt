@@ -7,14 +7,14 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.View
-import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.SeekBar
-import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import com.turbomacro.app.engine.HapticEngine
@@ -26,19 +26,18 @@ import com.turbomacro.app.model.MacroStep
 import com.turbomacro.app.storage.ProfileRepository
 
 /**
- * 小米 Game Turbo 风格悬浮窗总控中心
+ * 小米 Game Turbo 风格悬浮窗总控中心（支持「音量+」呼出编辑与战斗态全隐藏）
  *
- * 管控 4 个独立轻量图层：
- * 1. RippleFeedbackOverlayView：全屏完全穿透层（0 触控拦截），仅绘制青蓝色点击水波纹
- * 2. TargetEditorOverlayView：仅在「编辑/录制」模式下挂载，锁定后彻底移除，绝不挡视野
- * 3. FloatingTriggerButtonView：按住执行、松开即停的幽灵微透触发键
- * 4. 迷你胶囊工具条：一键切换「战斗锁定 / 编辑靶点 / 手势录制 / 隐藏」
+ * - 战斗锁定态 (`isCombatLocked = true`)：
+ *   顶部胶囊工具条与靶点图层 **100% 隐藏移除**！屏幕上仅保留半透明微透触发键与完全穿透的水波纹层，真正零遮挡。
+ *   用户只需按一下手机侧边的 **「音量+」键**，即可随时呼出编辑面板调整准星或录制手势！
  */
 class OverlayController(
     private val context: Context,
     private val serviceProvider: () -> AccessibilityService?
 ) {
     private val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val mainHandler = Handler(Looper.getMainLooper())
     private val repository = ProfileRepository(context)
     val touchInjector = TouchInjector()
     private val hapticEngine = HapticEngine(context)
@@ -57,13 +56,26 @@ class OverlayController(
     private var isShowing = false
     private var isCombatLocked = true
 
-    private val macroEngine = HoldToRunMacroEngine(
+    private val macroEngine: HoldToRunMacroEngine = HoldToRunMacroEngine(
         touchInjector = touchInjector,
         hapticEngine = hapticEngine,
         onVisualRipple = { x, y, endX, endY ->
             rippleOverlay?.spawnRipple(x, y, endX, endY)
         },
-        onRunStateChanged = { _ -> }
+        onRunStateChanged = { _ ->
+            mainHandler.post {
+                triggerButton?.refreshVisualState()
+            }
+        },
+        onInjectionBlockedWarning = {
+            mainHandler.post {
+                Toast.makeText(
+                    context,
+                    "提示：请确认已在系统设置开启「TurboMacro 无障碍服务」或「授权 Shizuku」以使点击在游戏内生效",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
     )
 
     fun isOverlayShowing(): Boolean = isShowing
@@ -71,6 +83,7 @@ class OverlayController(
     fun showOverlay() {
         if (isShowing) return
         currentProfile = repository.loadProfile()
+        isCombatLocked = true
 
         // 1. 挂载全屏穿透水波纹层 (FLAG_NOT_TOUCHABLE 保证 100% 不拦截游戏点击)
         val ripple = RippleFeedbackOverlayView(context)
@@ -107,6 +120,12 @@ class OverlayController(
 
         val btn = FloatingTriggerButtonView(
             context = context,
+            isShizukuModeProvider = {
+                touchInjector.getActiveBackend() == TouchInjector.ActiveBackend.SHIZUKU_INPUT_MANAGER
+            },
+            isMacroRunningProvider = {
+                macroEngine.isRunning()
+            },
             onHoldStart = {
                 macroEngine.onTriggerPressDown(serviceProvider(), currentProfile)
             },
@@ -135,10 +154,44 @@ class OverlayController(
         triggerButton = btn
         triggerParams = triggerLp
 
-        // 3. 挂载顶部侧边迷你胶囊控制条（支持一键锁定/解锁编辑/添加靶点/手势录制）
+        // 3. 准备编辑态胶囊条（战斗态下默认 GONE 完全隐身，按【音量+】键呼出）
         attachMiniDock()
+        miniDockView?.visibility = View.GONE
 
         isShowing = true
+        Toast.makeText(
+            context,
+            "已进入战斗隐身态！按一下手机【音量+】键可随时呼出/隐藏靶点编辑模式",
+            Toast.LENGTH_LONG
+        ).show()
+    }
+
+    /**
+     * 供「音量+」物理按键或界面按钮调用：一键切换「战斗全隐身态」与「靶点编辑态」
+     */
+    fun toggleCombatEditMode() {
+        if (!isShowing) return
+        mainHandler.post {
+            macroEngine.forceStop()
+            isCombatLocked = !isCombatLocked
+            triggerButton?.isLockedForCombat = isCombatLocked
+            triggerButton?.refreshVisualState()
+
+            if (isCombatLocked) {
+                // 切回战斗态：彻底隐藏顶部工具条、弹窗与靶点编辑层
+                miniDockView?.visibility = View.GONE
+                dismissStepInspectorPopup()
+                detachTargetEditor()
+                repository.saveProfile(currentProfile)
+                hapticEngine.performTriggerUp()
+                Toast.makeText(context, "🔒 已锁定并隐藏编辑栏（按【音量+】可再次编辑）", Toast.LENGTH_SHORT).show()
+            } else {
+                // 进入编辑态：显示顶部工具条与全屏准星靶点
+                miniDockView?.visibility = View.VISIBLE
+                attachTargetEditor()
+                hapticEngine.performTriggerDown()
+            }
+        }
     }
 
     fun hideOverlay() {
@@ -170,52 +223,23 @@ class OverlayController(
         val container = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(dpToPx(10), dpToPx(6), dpToPx(10), dpToPx(6))
+            setPadding(dpToPx(12), dpToPx(6), dpToPx(12), dpToPx(6))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#CC121824"))
+                setColor(Color.parseColor("#E6121824"))
                 cornerRadius = dpToPx(20).toFloat()
-                setStroke(dpToPx(1), Color.parseColor("#6600E5FF"))
+                setStroke(dpToPx(1), Color.parseColor("#00E5FF"))
             }
-            alpha = 0.72f
         }
 
-        val modeBtn = createCapsuleTextButton(if (isCombatLocked) "🔒 战斗态" else "✏️ 编辑态")
-        val addTapBtn = createCapsuleTextButton("+靶点").apply {
-            visibility = if (isCombatLocked) View.GONE else View.VISIBLE
-        }
-        val addSwipeBtn = createCapsuleTextButton("+划屏").apply {
-            visibility = if (isCombatLocked) View.GONE else View.VISIBLE
-        }
-        val recordBtn = createCapsuleTextButton("● 录制").apply {
-            visibility = if (isCombatLocked) View.GONE else View.VISIBLE
-        }
-        val clearBtn = createCapsuleTextButton("清空").apply {
-            visibility = if (isCombatLocked) View.GONE else View.VISIBLE
-        }
+        val lockBtn = createCapsuleTextButton("✅ 完成锁定(或按音量+)")
+        val addTapBtn = createCapsuleTextButton("+靶点")
+        val addSwipeBtn = createCapsuleTextButton("+划屏")
+        val recordBtn = createCapsuleTextButton("● 录制")
+        val clearBtn = createCapsuleTextButton("清空")
 
-        modeBtn.setOnClickListener {
-            macroEngine.forceStop()
-            isCombatLocked = !isCombatLocked
-            triggerButton?.isLockedForCombat = isCombatLocked
-
-            if (isCombatLocked) {
-                modeBtn.text = "🔒 战斗态"
-                addTapBtn.visibility = View.GONE
-                addSwipeBtn.visibility = View.GONE
-                recordBtn.visibility = View.GONE
-                clearBtn.visibility = View.GONE
-                container.alpha = 0.55f
-                dismissStepInspectorPopup()
-                detachTargetEditor()
-                repository.saveProfile(currentProfile)
-            } else {
-                modeBtn.text = "✅ 完成锁定"
-                addTapBtn.visibility = View.VISIBLE
-                addSwipeBtn.visibility = View.VISIBLE
-                recordBtn.visibility = View.VISIBLE
-                clearBtn.visibility = View.VISIBLE
-                container.alpha = 0.95f
-                attachTargetEditor()
+        lockBtn.setOnClickListener {
+            if (!isCombatLocked) {
+                toggleCombatEditMode()
             }
         }
 
@@ -226,8 +250,8 @@ class OverlayController(
                 type = ActionType.TAP,
                 x = 540f + (nextId * 35f) % 240f,
                 y = 920f + (nextId * 35f) % 240f,
-                holdDurationMs = 14L,
-                intervalAfterMs = 28L
+                holdDurationMs = 28L,
+                intervalAfterMs = 32L
             )
             currentProfile.steps.add(step)
             repository.saveProfile(currentProfile)
@@ -271,7 +295,7 @@ class OverlayController(
             Toast.makeText(context, "已清空靶点，请点击 +靶点 或 ●录制", Toast.LENGTH_SHORT).show()
         }
 
-        // 支持长按或拖动胶囊条本身换位置
+        // 支持拖动编辑胶囊条位置
         var lastDockRawX = 0f
         var lastDockRawY = 0f
         container.setOnTouchListener { _, ev ->
@@ -300,7 +324,7 @@ class OverlayController(
             }
         }
 
-        container.addView(modeBtn)
+        container.addView(lockBtn)
         container.addView(addTapBtn)
         container.addView(addSwipeBtn)
         container.addView(recordBtn)
@@ -317,6 +341,7 @@ class OverlayController(
             gravity = Gravity.TOP or Gravity.START
             x = dpToPx(24)
             y = dpToPx(48)
+            applyCutoutShortEdges(this)
         }
 
         windowManager.addView(container, dockLp)
@@ -365,9 +390,6 @@ class OverlayController(
         targetEditorOverlay = null
     }
 
-    /**
-     * 轻点某个准星靶点时，弹出紧凑的毫秒级参数微调悬浮卡片
-     */
     @SuppressLint("SetTextI18n")
     private fun showStepInspectorPopup(step: MacroStep) {
         dismissStepInspectorPopup()
@@ -389,20 +411,20 @@ class OverlayController(
         }
         card.addView(title)
 
-        // 1. 按压时长调节 (8ms ~ 300ms)
+        // 1. 按压时长调节 (25ms ~ 300ms，游戏帧采样至少需 25ms)
         val holdLabel = TextView(context).apply {
-            text = "按压时长: ${step.holdDurationMs} ms"
+            text = "按压时长: ${step.holdDurationMs} ms (游戏推荐 ≥26ms)"
             setTextColor(Color.WHITE)
             textSize = 13f
             setPadding(0, dpToPx(8), 0, dpToPx(2))
         }
         val holdSeek = SeekBar(context).apply {
-            max = 292
-            progress = (step.holdDurationMs - 8L).toInt().coerceIn(0, 292)
+            max = 280
+            progress = (step.holdDurationMs - 20L).toInt().coerceIn(0, 280)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                    step.holdDurationMs = (p + 8).toLong()
-                    holdLabel.text = "按压时长: ${step.holdDurationMs} ms"
+                    step.holdDurationMs = (p + 20).toLong()
+                    holdLabel.text = "按压时长: ${step.holdDurationMs} ms (游戏推荐 ≥26ms)"
                 }
                 override fun onStartTrackingTouch(s: SeekBar?) {}
                 override fun onStopTrackingTouch(s: SeekBar?) {
@@ -413,7 +435,7 @@ class OverlayController(
         card.addView(holdLabel)
         card.addView(holdSeek)
 
-        // 2. 连点间隔调节 (6ms ~ 500ms)
+        // 2. 连点间隔调节 (12ms ~ 500ms)
         val gapLabel = TextView(context).apply {
             val cps = 1000f / (step.holdDurationMs + step.intervalAfterMs).coerceAtLeast(1L)
             text = "步间间隔: ${step.intervalAfterMs} ms (约 ${String.format("%.1f", cps)} 次/秒)"
@@ -422,11 +444,11 @@ class OverlayController(
             setPadding(0, dpToPx(8), 0, dpToPx(2))
         }
         val gapSeek = SeekBar(context).apply {
-            max = 494
-            progress = (step.intervalAfterMs - 6L).toInt().coerceIn(0, 494)
+            max = 488
+            progress = (step.intervalAfterMs - 12L).toInt().coerceIn(0, 488)
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                    step.intervalAfterMs = (p + 6).toLong()
+                    step.intervalAfterMs = (p + 12).toLong()
                     val cps = 1000f / (step.holdDurationMs + step.intervalAfterMs).coerceAtLeast(1L)
                     gapLabel.text = "步间间隔: ${step.intervalAfterMs} ms (约 ${String.format("%.1f", cps)} 次/秒)"
                 }
@@ -439,7 +461,6 @@ class OverlayController(
         card.addView(gapLabel)
         card.addView(gapSeek)
 
-        // 3. 底部按钮行（删除此靶点 / 关闭弹窗）
         val btnRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.END
@@ -452,10 +473,8 @@ class OverlayController(
             setBackgroundColor(Color.TRANSPARENT)
             setOnClickListener {
                 currentProfile.steps.remove(step)
-                // 重新编号
                 currentProfile.steps.forEachIndexed { index, s ->
-                    val updated = s.copy(id = index + 1)
-                    currentProfile.steps[index] = updated
+                    currentProfile.steps[index] = s.copy(id = index + 1)
                 }
                 repository.saveProfile(currentProfile)
                 targetEditorOverlay?.invalidate()

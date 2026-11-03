@@ -2,6 +2,7 @@ package com.turbomacro.app.service
 
 import android.accessibilityservice.AccessibilityService
 import android.content.Intent
+import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
 import com.turbomacro.app.overlay.OverlayController
 
@@ -10,7 +11,7 @@ import com.turbomacro.app.overlay.OverlayController
  *
  * 安全承诺：
  * - `canRetrieveWindowContent="false"`：绝不读取屏幕文字、密码或任何应用隐私树
- * - 仅用作悬浮层承载与无障碍手势通道兜底
+ * - 支持监听「音量+」按键一键进入/退出编辑模式（使得战斗态下顶部胶囊条彻底隐身）
  */
 class MacroAccessibilityService : AccessibilityService() {
 
@@ -27,6 +28,20 @@ class MacroAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         overlayController = OverlayController(applicationContext) { this }
+    }
+
+    override fun onKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            val ctrl = overlayController
+            if (ctrl != null && ctrl.isOverlayShowing()) {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    ctrl.toggleCombatEditMode()
+                }
+                // 悬浮窗开启期间拦截音量+，专门用作「编辑态 / 战斗隐身态」切换热键，不弹出系统音量条挡视野
+                return true
+            }
+        }
+        return super.onKeyEvent(event)
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {

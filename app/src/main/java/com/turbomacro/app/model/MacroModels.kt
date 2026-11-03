@@ -32,7 +32,7 @@ data class MacroStep(
     var y: Float,
     var endX: Float = x,
     var endY: Float = y,
-    var holdDurationMs: Long = 14L,
+    var holdDurationMs: Long = 28L,
     var intervalAfterMs: Long = 35L,
     var jitterRadiusPx: Float = 3f
 ) {

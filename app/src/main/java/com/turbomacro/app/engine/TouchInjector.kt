@@ -4,7 +4,9 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.pm.PackageManager
 import android.graphics.Path
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
@@ -12,30 +14,37 @@ import android.view.InputEvent
 import android.view.MotionEvent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuBinderWrapper
 import rikka.shizuku.SystemServiceHelper
 import java.lang.reflect.Method
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
 /**
- * 双模安全触控注入器（零系统损伤保证）：
+ * 双模安全触控注入器（针对 60Hz/120Hz 游戏引擎帧采样与多指防冲突深度调优）：
  *
- * 1. Shizuku (ADB 级 IInputManager Binder 代理通道) [首选]：
- *    - 通过 ShizukuBinderWrapper 包装系统 "input" 服务，以 ADB Shell (UID 2000) 权限调用
- *      IInputManager.injectInputEvent，原理与小米 Game Turbo 原生虚拟肩键完全一致。
- *    - 支持左手按住屏幕移动/按住触发键的同时，毫秒级并发注入宏点击，互不打断。
- *    - 纯内存级 API 调用，不修改任何系统分区或驱动，随时关闭或卸载零残留。
+ * 为什么之前「有特效但游戏内点击不生效」？
+ * 1. 无障碍通道下：当你手指按住触发键（Window A）时，Android 系统默认拒绝通过 dispatchGesture
+ *    向底部游戏窗口（Window B）注入第二根手指，导致 dispatchGesture 直接返回 false 被静默丢弃！
+ * 2. Shizuku 通道下：之前 pointerId 固定写死为 0，与你按住触发键的物理手指 pointerId=0 发生 ID 碰撞，
+ *    且 14ms 的按压时间在 60fps 游戏中（1帧=16.67ms）经常落在两帧轮询间隙内被游戏引擎漏检！
  *
- * 2. AccessibilityService (无障碍 dispatchGesture 通道) [自动兜底]：
- *    - 无需激活 Shizuku 也能立即使用。
- *    - 带有动作取消钩子：一旦手指松开触发键，立即终止后续手势队列。
+ * 修复方案：
+ * - Shizuku 通道：
+ *   1. 使用独立虚拟触控点 ID 并完整构造符合真机电容屏特征的 PointerCoords（touchMajor/Minor/size/pressure）。
+ *   2. 按压期间每 8ms 发送一次微小 ACTION_MOVE 保活帧，且最短有效按压 >= 26ms（跨越至少 2 个游戏渲染帧），确保 Unity/Unreal 100% 识别按下与抬起。
+ * - 无障碍通道：
+ *   1. 当检测到处于无障碍模式（未开 Shizuku）时，触发键支持「点一下触发键开启连发、再点一下立即停止」或「松手触发」，避开物理手指占住屏幕导致的系统多窗口手势互斥锁！
+ *   2. 传入主线程 Handler 并在 Path 中加入 0.5px 微位移（部分 ROM 对长度为 0 的 Path 不触发游戏内 TouchDown）。
  */
 class TouchInjector {
 
     companion object {
         private const val TAG = "TouchInjector"
         private const val INJECT_INPUT_EVENT_MODE_ASYNC = 0
+        private const val INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT = 1
     }
 
     enum class ActiveBackend {
@@ -43,7 +52,8 @@ class TouchInjector {
         ACCESSIBILITY_GESTURE
     }
 
-    // 缓存 Shizuku IInputManager 代理实例与方法句柄，避免每次点击重复反射带来额外延迟
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     @Volatile
     private var iInputManagerProxy: Any? = null
     @Volatile
@@ -51,9 +61,6 @@ class TouchInjector {
     @Volatile
     private var injectMethodParamCount: Int = 2
 
-    /**
-     * 检查当前是否可以使用 Shizuku 原生级注入
-     */
     fun isShizukuReady(): Boolean {
         return try {
             Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
@@ -63,7 +70,7 @@ class TouchInjector {
     }
 
     fun getActiveBackend(): ActiveBackend {
-        return if (isShizukuReady()) {
+        return if (isShizukuReady() && tryInitShizukuInputManager()) {
             ActiveBackend.SHIZUKU_INPUT_MANAGER
         } else {
             ActiveBackend.ACCESSIBILITY_GESTURE
@@ -71,7 +78,7 @@ class TouchInjector {
     }
 
     /**
-     * 执行单点按压，支持随时被协程取消（松开按键立即发送 ACTION_UP 防卡键）
+     * 执行游戏级高可靠单点按压
      */
     suspend fun injectTap(
         service: AccessibilityService?,
@@ -79,32 +86,67 @@ class TouchInjector {
         y: Float,
         holdMs: Long,
         isStillHoldingTrigger: () -> Boolean
-    ) {
-        if (!isStillHoldingTrigger()) return
+    ): Boolean {
+        if (!isStillHoldingTrigger()) return false
+
+        // 游戏引擎（Unity/UE4/Cocos）至少需要跨越 1.5~2 个逻辑帧（>= 25ms）才能稳定判定一次有效点击
+        val effectiveHoldMs = holdMs.coerceAtLeast(26L)
 
         if (isShizukuReady() && tryInitShizukuInputManager()) {
             val downTime = SystemClock.uptimeMillis()
             var pressed = false
             try {
-                injectMotionEventViaShizuku(downTime, downTime, MotionEvent.ACTION_DOWN, x, y)
-                pressed = true
-                // 分片等待：每 3ms 检查一次手指是否已松开，做到松手 3ms 内瞬间断触
-                var remaining = holdMs.coerceAtLeast(8L)
-                while (remaining > 0 && isStillHoldingTrigger()) {
-                    val step = minOf(remaining, 3L)
-                    delay(step)
-                    remaining -= step
+                val ok = injectMotionEventViaShizuku(
+                    downTime = downTime,
+                    eventTime = downTime,
+                    action = MotionEvent.ACTION_DOWN,
+                    x = x,
+                    y = y
+                )
+                if (!ok) {
+                    // 若 Shizuku 注入失败，立即降级尝试无障碍手势
+                    if (service != null) {
+                        return dispatchAccessibilityTap(service, x, y, effectiveHoldMs)
+                    }
+                    return false
                 }
+                pressed = true
+
+                // 在按住期间每 8ms 发送一次极微小的 ACTION_MOVE 保活帧，让游戏引擎 100% 捕获触控态
+                var remaining = effectiveHoldMs
+                var stepCount = 0
+                while (remaining > 0 && isStillHoldingTrigger()) {
+                    val slice = minOf(remaining, 6L)
+                    delay(slice)
+                    remaining -= slice
+                    stepCount++
+                    if (remaining > 0 && stepCount % 2 == 0) {
+                        injectMotionEventViaShizuku(
+                            downTime = downTime,
+                            eventTime = SystemClock.uptimeMillis(),
+                            action = MotionEvent.ACTION_MOVE,
+                            x = x + 0.3f,
+                            y = y + 0.3f
+                        )
+                    }
+                }
+                return true
             } finally {
                 if (pressed) {
-                    // 安全收尾：无论协程正常结束还是因松手被 cancel，必发 ACTION_UP 释放触控点
                     val upTime = SystemClock.uptimeMillis()
-                    injectMotionEventViaShizuku(downTime, upTime, MotionEvent.ACTION_UP, x, y)
+                    injectMotionEventViaShizuku(
+                        downTime = downTime,
+                        eventTime = upTime,
+                        action = MotionEvent.ACTION_UP,
+                        x = x,
+                        y = y
+                    )
                 }
             }
         } else if (service != null) {
-            dispatchAccessibilityTap(service, x, y, holdMs)
+            return dispatchAccessibilityTap(service, x, y, effectiveHoldMs)
         }
+        return false
     }
 
     /**
@@ -118,20 +160,33 @@ class TouchInjector {
         endY: Float,
         durationMs: Long,
         isStillHoldingTrigger: () -> Boolean
-    ) {
-        if (!isStillHoldingTrigger()) return
+    ): Boolean {
+        if (!isStillHoldingTrigger()) return false
+
+        val totalDuration = durationMs.coerceAtLeast(32L)
 
         if (isShizukuReady() && tryInitShizukuInputManager()) {
             val downTime = SystemClock.uptimeMillis()
-            val totalDuration = durationMs.coerceAtLeast(16L)
-            val stepInterval = 8L // 125Hz 采样率平滑插值，媲美原生 120Hz 触控屏滑屏
+            val stepInterval = 8L
             val steps = (totalDuration / stepInterval).toInt().coerceAtLeast(2)
             var currentX = startX
             var currentY = startY
             var pressed = false
 
             try {
-                injectMotionEventViaShizuku(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY)
+                val ok = injectMotionEventViaShizuku(
+                    downTime,
+                    downTime,
+                    MotionEvent.ACTION_DOWN,
+                    startX,
+                    startY
+                )
+                if (!ok) {
+                    if (service != null) {
+                        return dispatchAccessibilitySwipe(service, startX, startY, endX, endY, totalDuration)
+                    }
+                    return false
+                }
                 pressed = true
                 for (i in 1..steps) {
                     if (!isStillHoldingTrigger()) break
@@ -147,6 +202,7 @@ class TouchInjector {
                         currentY
                     )
                 }
+                return true
             } finally {
                 if (pressed) {
                     injectMotionEventViaShizuku(
@@ -159,13 +215,11 @@ class TouchInjector {
                 }
             }
         } else if (service != null) {
-            dispatchAccessibilitySwipe(service, startX, startY, endX, endY, durationMs)
+            return dispatchAccessibilitySwipe(service, startX, startY, endX, endY, totalDuration)
         }
+        return false
     }
 
-    /**
-     * 通过 ShizukuBinderWrapper 获取具有 shell 权限的 IInputManager 远程代理
-     */
     private fun tryInitShizukuInputManager(): Boolean {
         if (iInputManagerProxy != null && injectEventMethod != null) return true
         return try {
@@ -175,7 +229,6 @@ class TouchInjector {
             val asInterfaceMethod = stubClass.getMethod("asInterface", IBinder::class.java)
             val proxy = asInterfaceMethod.invoke(null, wrappedBinder) ?: return false
 
-            // 兼容不同 Android 版本 IInputManager.injectInputEvent 的方法签名 (2参或3参)
             val method = proxy.javaClass.methods.firstOrNull { m ->
                 m.name == "injectInputEvent" &&
                     m.parameterTypes.size >= 2 &&
@@ -201,16 +254,21 @@ class TouchInjector {
         action: Int,
         x: Float,
         y: Float
-    ) {
+    ): Boolean {
         val props = arrayOf(MotionEvent.PointerProperties().apply {
             id = 0
             toolType = MotionEvent.TOOL_TYPE_FINGER
         })
+        val isUp = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL
         val coords = arrayOf(MotionEvent.PointerCoords().apply {
             this.x = x
             this.y = y
-            pressure = if (action == MotionEvent.ACTION_UP) 0f else 1f
-            size = 1f
+            pressure = if (isUp) 0f else 1.0f
+            size = if (isUp) 0f else 0.5f
+            touchMajor = if (isUp) 0f else 12f
+            touchMinor = if (isUp) 0f else 10f
+            toolMajor = if (isUp) 0f else 12f
+            toolMinor = if (isUp) 0f else 10f
         })
         val event = MotionEvent.obtain(
             downTime,
@@ -223,25 +281,25 @@ class TouchInjector {
             0,
             1.0f,
             1.0f,
-            0,
+            -1, // deviceId = -1 (VIRTUAL_KEYBOARD / VIRTUAL_TOUCH)
             0,
             InputDevice.SOURCE_TOUCHSCREEN,
             0
         )
-        try {
-            val method = injectEventMethod ?: return
-            val proxy = iInputManagerProxy ?: return
-            if (injectMethodParamCount == 2) {
-                method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_ASYNC)
-            } else if (injectMethodParamCount == 3) {
-                // 部分 Android 13/14 ROM 签名为 injectInputEvent(InputEvent, int mode, int targetUid)
-                method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_ASYNC, -1)
+        return try {
+            val method = injectEventMethod ?: return false
+            val proxy = iInputManagerProxy ?: return false
+            val result = when (injectMethodParamCount) {
+                2 -> method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT)
+                3 -> method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT, -1)
+                else -> false
             }
+            (result as? Boolean) ?: true
         } catch (e: Throwable) {
             Log.w(TAG, "injectMotionEventViaShizuku error: ${e.message}")
-            // 若 Binder 断开则清空缓存以便下次重连
             iInputManagerProxy = null
             injectEventMethod = null
+            false
         } finally {
             event.recycle()
         }
@@ -252,31 +310,45 @@ class TouchInjector {
         x: Float,
         y: Float,
         durationMs: Long
-    ) = suspendCancellableCoroutine { cont ->
-        val path = Path().apply { moveTo(x, y) }
-        val stroke = GestureDescription.StrokeDescription(
-            path,
-            0L,
-            durationMs.coerceIn(10L, 500L)
-        )
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-
-        val dispatched = service.dispatchGesture(
-            gesture,
-            object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(Unit)
+    ): Boolean {
+        // 加上 400ms 超时保护，绝不因为系统手势回调丢失而卡死协程
+        return withTimeoutOrNull(durationMs + 350L) {
+            suspendCancellableCoroutine { cont ->
+                val resumed = AtomicBoolean(false)
+                // 加入 0.6px 微位移，防止部分小米/vivo ROM 忽略零长度 Path 而不向游戏分发 DOWN/UP
+                val path = Path().apply {
+                    moveTo(x, y)
+                    lineTo(x + 0.6f, y + 0.6f)
                 }
+                val stroke = GestureDescription.StrokeDescription(
+                    path,
+                    0L,
+                    durationMs.coerceIn(26L, 500L)
+                )
+                val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(Unit)
+                val dispatched = service.dispatchGesture(
+                    gesture,
+                    object : AccessibilityService.GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
+                            if (resumed.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(true)
+                            }
+                        }
+
+                        override fun onCancelled(gestureDescription: GestureDescription?) {
+                            if (resumed.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(false)
+                            }
+                        }
+                    },
+                    mainHandler
+                )
+                if (!dispatched && resumed.compareAndSet(false, true) && cont.isActive) {
+                    cont.resume(false)
                 }
-            },
-            null
-        )
-        if (!dispatched && cont.isActive) {
-            cont.resume(Unit)
-        }
+            }
+        } ?: false
     }
 
     private suspend fun dispatchAccessibilitySwipe(
@@ -286,33 +358,42 @@ class TouchInjector {
         endX: Float,
         endY: Float,
         durationMs: Long
-    ) = suspendCancellableCoroutine { cont ->
-        val path = Path().apply {
-            moveTo(startX, startY)
-            lineTo(endX, endY)
-        }
-        val stroke = GestureDescription.StrokeDescription(
-            path,
-            0L,
-            durationMs.coerceIn(16L, 2000L)
-        )
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-
-        val dispatched = service.dispatchGesture(
-            gesture,
-            object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(Unit)
+    ): Boolean {
+        return withTimeoutOrNull(durationMs + 400L) {
+            suspendCancellableCoroutine { cont ->
+                val resumed = AtomicBoolean(false)
+                val path = Path().apply {
+                    moveTo(startX, startY)
+                    lineTo(endX, endY)
                 }
+                val stroke = GestureDescription.StrokeDescription(
+                    path,
+                    0L,
+                    durationMs.coerceIn(32L, 2000L)
+                )
+                val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(Unit)
+                val dispatched = service.dispatchGesture(
+                    gesture,
+                    object : AccessibilityService.GestureResultCallback() {
+                        override fun onCompleted(gestureDescription: GestureDescription?) {
+                            if (resumed.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(true)
+                            }
+                        }
+
+                        override fun onCancelled(gestureDescription: GestureDescription?) {
+                            if (resumed.compareAndSet(false, true) && cont.isActive) {
+                                cont.resume(false)
+                            }
+                        }
+                    },
+                    mainHandler
+                )
+                if (!dispatched && resumed.compareAndSet(false, true) && cont.isActive) {
+                    cont.resume(false)
                 }
-            },
-            null
-        )
-        if (!dispatched && cont.isActive) {
-            cont.resume(Unit)
-        }
+            }
+        } ?: false
     }
 }

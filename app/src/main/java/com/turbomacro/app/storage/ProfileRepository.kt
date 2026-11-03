@@ -44,8 +44,8 @@ class ProfileRepository(context: Context) {
                     type = ActionType.TAP,
                     x = 540f,
                     y = 960f,
-                    holdDurationMs = 14L,
-                    intervalAfterMs = 28L,
+                    holdDurationMs = 28L,
+                    intervalAfterMs = 32L,
                     jitterRadiusPx = 3f
                 )
             )
