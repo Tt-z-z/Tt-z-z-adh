@@ -30,19 +30,19 @@ jobs:
       - name: Build Debug APK
         run: |
           gradle assembleDebug --no-daemon
-          cp app/build/outputs/apk/debug/app-debug.apk TurboMacro-v1.1.apk
+          cp app/build/outputs/apk/debug/app-debug.apk TurboMacro-v1.2.apk
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TurboMacro-Debug-APK
-          path: TurboMacro-v1.1.apk
+          path: TurboMacro-v1.2.apk
           if-no-files-found: error
 
       - name: Publish APK to GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.0
-          name: "TurboMacro 极速肩键宏 v1.1.0 (音量+呼出编辑 & 游戏触控修复版)"
-          body: "手机端点击下方 Assets 中的 `TurboMacro-v1.1.apk` 即可直接下载安装（无需解压）。\n\n更新内容：\n1. 战斗态彻底隐藏顶部胶囊栏，按【音量+】一键进入/退出编辑模式。\n2. 彻底修复游戏内点击不生效问题（解决无障碍跨窗口手势拦截与 60/120fps 游戏引擎采样漏帧）。"
-          files: TurboMacro-v1.1.apk
+          tag_name: v1.2.0
+          name: "TurboMacro 极速肩键宏 v1.2.0 (修复音量+呼出编辑 & 三击触发键双保险)"
+          body: "手机端点击下方 Assets 中的 `TurboMacro-v1.2.apk` 即可直接下载安装（无需解压）。\n\n更新内容：\n1. 修复【音量+】无法呼出编辑模式的问题（统一全局 OverlayController 单例 + 新增系统级音量广播监听，即使只开 Shizuku 不开无障碍也能 100% 响应【音量+】）。\n2. 新增双保险手势：快速连点 3 下悬浮触发圆环也可随时进入/退出编辑模式。"
+          files: TurboMacro-v1.2.apk

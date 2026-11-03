@@ -1,6 +1,7 @@
 package com.turbomacro.app.service
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Intent
 import android.view.KeyEvent
 import android.view.accessibility.AccessibilityEvent
@@ -11,7 +12,7 @@ import com.turbomacro.app.overlay.OverlayController
  *
  * 安全承诺：
  * - `canRetrieveWindowContent="false"`：绝不读取屏幕文字、密码或任何应用隐私树
- * - 支持监听「音量+」按键一键进入/退出编辑模式（使得战斗态下顶部胶囊条彻底隐身）
+ * - 与 MainActivity 共享同一个全局 OverlayController 单例，按【音量+】100% 呼出编辑面板
  */
 class MacroAccessibilityService : AccessibilityService() {
 
@@ -21,23 +22,32 @@ class MacroAccessibilityService : AccessibilityService() {
             private set
     }
 
-    var overlayController: OverlayController? = null
-        private set
-
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
-        overlayController = OverlayController(applicationContext) { this }
+
+        // 动态确保运行时启用按键过滤标记
+        try {
+            val info = serviceInfo
+            if (info != null) {
+                info.flags = info.flags or AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS
+                serviceInfo = info
+            }
+        } catch (_: Throwable) {
+        }
+
+        val controller = OverlayController.getInstance(applicationContext)
+        controller.serviceProvider = { instance }
     }
 
     override fun onKeyEvent(event: KeyEvent): Boolean {
         if (event.keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
-            val ctrl = overlayController
-            if (ctrl != null && ctrl.isOverlayShowing()) {
+            val ctrl = OverlayController.getInstance(applicationContext)
+            if (ctrl.isOverlayShowing()) {
                 if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
                     ctrl.toggleCombatEditMode()
                 }
-                // 悬浮窗开启期间拦截音量+，专门用作「编辑态 / 战斗隐身态」切换热键，不弹出系统音量条挡视野
+                // 悬浮窗开启期间拦截音量+，专门用作「编辑态 / 战斗隐身态」切换热键
                 return true
             }
         }
@@ -45,16 +55,14 @@ class MacroAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // 不监听、不采集任何界面事件，保持 0 CPU 占用与绝对隐私安全
     }
 
     override fun onInterrupt() {
-        overlayController?.hideOverlay()
+        OverlayController.getInstance(applicationContext).hideOverlay()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        overlayController?.hideOverlay()
-        overlayController = null
+        OverlayController.getInstance(applicationContext).hideOverlay()
         instance = null
         return super.onUnbind(intent)
     }

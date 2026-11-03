@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
@@ -12,13 +13,8 @@ import kotlin.math.abs
 /**
  * 小米 Game Turbo 风格悬浮触发键（幽灵微透圆环）
  *
- * 【极其关键的底层防冲突机制】：
- * - 当开启了 **Shizuku** 时：系统支持多窗口并发注入，手指 **按住触发键 (ACTION_DOWN) 立即连发，松手 (ACTION_UP) 立停**。
- * - 当仅开启 **无障碍服务（未授权 Shizuku）** 时：
- *   由于 Android 无障碍底层限制，只要你的物理手指还按在悬浮按钮上（占用着触控通道），
- *   系统就会拒绝 `dispatchGesture` 向底下的游戏窗口注入点击（这就是为什么之前有水波纹特效但游戏内没反应）！
- *   因此，在纯无障碍模式下，我们升级为 **「松手瞬间/轻点切换极速连发 + 按住期间智能短暂释放焦点」**：
- *   - 轻点一下触发键（手指离开屏幕）-> 立即全速连点游戏！再碰一下触发键 -> 0ms 立即停止！
+ * - 支持「按住触发 / 轻触触发」
+ * - 支持「快速连点 3 下触发键」直接进入/退出编辑模式（作为【音量+】物理键的双保险兜底）
  */
 @SuppressLint("ViewConstructor")
 class FloatingTriggerButtonView(
@@ -28,7 +24,8 @@ class FloatingTriggerButtonView(
     private val onHoldStart: () -> Unit,
     private val onHoldEnd: () -> Unit,
     private val onDragMoved: (newX: Int, newY: Int) -> Unit,
-    private val onOpenMenuClicked: () -> Unit
+    private val onOpenMenuClicked: () -> Unit,
+    private val onQuickEditGesture: () -> Unit = {}
 ) : View(context) {
 
     var isLockedForCombat: Boolean = true
@@ -49,6 +46,10 @@ class FloatingTriggerButtonView(
     private var lastRawX = 0f
     private var lastRawY = 0f
     private var hasDragged = false
+
+    // 快速连击 3 下进入编辑态计数器
+    private var tapStreakCount = 0
+    private var lastTapDownUptimeMs = 0L
 
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
@@ -127,6 +128,23 @@ class FloatingTriggerButtonView(
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (isLockedForCombat) {
+            if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                val now = SystemClock.uptimeMillis()
+                if (now - lastTapDownUptimeMs <= 320L) {
+                    tapStreakCount++
+                } else {
+                    tapStreakCount = 1
+                }
+                lastTapDownUptimeMs = now
+                if (tapStreakCount >= 3) {
+                    tapStreakCount = 0
+                    isPressing = false
+                    onHoldEnd()
+                    onQuickEditGesture()
+                    return true
+                }
+            }
+
             val shizukuMode = isShizukuModeProvider()
             if (shizukuMode) {
                 // Shizuku 原生通道：真·按住连发，松开即停（多指零冲突）
