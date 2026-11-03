@@ -161,8 +161,9 @@ class OverlayController private constructor(
         windowManager.addView(ripple, rippleLp)
         rippleOverlay = ripple
 
-        // 2. 挂载按住触发键
-        // FLAG_NOT_TOUCH_MODAL：窗口外触控直接穿透到游戏，绝不吃掉走位/瞄准手指
+        // 2. 挂载按住触发键（三角洲：按住连点开火，另一只手同时拖屏瞄准）
+        // FLAG_SPLIT_TOUCH 是关键：没有它时，手指按在悬浮钮上会导致游戏窗口收不到第二根手指，拖屏失灵
+        // FLAG_NOT_TOUCH_MODAL：按钮区域外的触控全部穿透到游戏
         val sizePx = dpToPx(currentProfile.triggerSizeDp.coerceIn(36, 96))
         val triggerLp = WindowManager.LayoutParams(
             sizePx,
@@ -170,6 +171,7 @@ class OverlayController private constructor(
             getOverlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_SPLIT_TOUCH or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
@@ -229,7 +231,7 @@ class OverlayController private constructor(
         isShowing = true
         Toast.makeText(
             context,
-            "已进入战斗隐身态！按一下【音量+】键（或快速连点3下触发键）即可进入编辑模式",
+            "按住悬浮钮=连点开火；另一只手可同时拖屏瞄准。编辑：音量+ 或连点悬浮钮3下",
             Toast.LENGTH_LONG
         ).show()
     }
@@ -469,6 +471,7 @@ class OverlayController private constructor(
             getOverlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_SPLIT_TOUCH or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
