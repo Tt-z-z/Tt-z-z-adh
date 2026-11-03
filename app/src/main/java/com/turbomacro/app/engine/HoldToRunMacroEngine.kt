@@ -15,9 +15,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 
 /**
- * 按住开火引擎（三角洲）：
- * - 仅在 Shizuku 就绪时允许按住连发（无障碍会打断屏幕其他手指，一律拒绝）
- * - 注入走 shell tap / 合成设备，不向物理触控屏塞 ACTION_DOWN
+ * 按住开火引擎：
+ * - 必须 TouchMux 已 ENGAGE（真屏抢占 + 同设备额外槽），否则拒绝启动
+ * - 禁止无障碍 / input tap（都会打断拖枪）
  */
 class HoldToRunMacroEngine(
     private val touchInjector: TouchInjector,
@@ -25,7 +25,7 @@ class HoldToRunMacroEngine(
     private val onVisualRipple: (x: Float, y: Float, endX: Float?, endY: Float?) -> Unit,
     private val onRunStateChanged: (isRunning: Boolean) -> Unit,
     private val onInjectionBlockedWarning: () -> Unit,
-    private val onRequireShizuku: () -> Unit = {}
+    private val onRequireMux: () -> Unit = {}
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val isHolding = AtomicBoolean(false)
@@ -38,10 +38,13 @@ class HoldToRunMacroEngine(
         val stepsSnapshot = profile.steps.map { it.copy() }
         if (stepsSnapshot.isEmpty()) return
 
-        // 按住连发 + 同时走位/瞄准：必须 Shizuku。无障碍会 cancel 其他手指。
-        if (!touchInjector.isShizukuReady()) {
-            onRequireShizuku()
-            return
+        if (!touchInjector.isMuxMerging()) {
+            // 尝试自动 ENGAGE（若用户正按着屏幕会失败，提示抬手）
+            val ok = touchInjector.ensureMuxReady()
+            if (!ok || !touchInjector.isMuxMerging()) {
+                onRequireMux()
+                return
+            }
         }
 
         if (!isHolding.compareAndSet(false, true)) return
@@ -76,7 +79,6 @@ class HoldToRunMacroEngine(
                             }
                         }
 
-                        // 严禁无障碍降级
                         val injectedOk = when (step.type) {
                             ActionType.TAP -> {
                                 touchInjector.injectTap(
@@ -89,16 +91,8 @@ class HoldToRunMacroEngine(
                                 )
                             }
                             ActionType.SWIPE -> {
-                                touchInjector.injectSwipe(
-                                    service = service,
-                                    startX = actualX,
-                                    startY = actualY,
-                                    endX = (step.endX + offsetX).coerceAtLeast(1f),
-                                    endY = (step.endY + offsetY).coerceAtLeast(1f),
-                                    durationMs = step.holdDurationMs.coerceAtLeast(32L),
-                                    isStillHoldingTrigger = { isHolding.get() && isActive },
-                                    allowAccessibilityFallback = false
-                                )
+                                // 连发通道不做滑屏，避免干扰多指合并
+                                false
                             }
                         }
 
@@ -107,7 +101,7 @@ class HoldToRunMacroEngine(
                             onInjectionBlockedWarning()
                         }
 
-                        var waitRemaining = step.intervalAfterMs.coerceAtLeast(16L)
+                        var waitRemaining = step.intervalAfterMs.coerceAtLeast(12L)
                         while (waitRemaining > 0 && isHolding.get() && isActive) {
                             val slice = minOf(waitRemaining, 4L)
                             delay(slice)

@@ -6,13 +6,22 @@ plugins {
 android {
     namespace = "com.turbomacro.app"
     compileSdk = 34
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.turbomacro.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 16
+        versionName = "1.6.0"
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_static")
+            }
+        }
     }
 
     buildTypes {
@@ -34,6 +43,20 @@ android {
     }
     buildFeatures {
         viewBinding = true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // libtouchmux.so is execve'd via Shizuku; keep uncompressed & extractable
+            useLegacyPackaging = true
+        }
     }
 }
 

@@ -61,7 +61,7 @@ class OverlayController private constructor(
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
     private val repository = ProfileRepository(context)
-    val touchInjector = TouchInjector()
+    val touchInjector = TouchInjector(context)
     private val hapticEngine = HapticEngine(context)
 
     var serviceProvider: () -> AccessibilityService? = { null }
@@ -131,16 +131,17 @@ class OverlayController private constructor(
             mainHandler.post {
                 Toast.makeText(
                     context,
-                    "点击注入失败：请确认 Shizuku 正在运行，且已打开「USB 调试（安全设置）」",
+                    "开火注入失败：TouchMux 未合并多指。请确认 Shizuku + USB 调试（安全设置），并先松开屏幕所有手指再开悬浮键",
                     Toast.LENGTH_LONG
                 ).show()
             }
         },
-        onRequireShizuku = {
+        onRequireMux = {
             mainHandler.post {
+                val detail = touchInjector.muxError() ?: "unknown"
                 Toast.makeText(
                     context,
-                    "按住连发且不影响走位/瞄准：必须开启并授权 Shizuku（无障碍会打断其他手指）",
+                    "需要先启用多指通道：松开屏幕全部手指约 1 秒，再按住开火键（$detail）",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -180,7 +181,7 @@ class OverlayController private constructor(
         val btn = FloatingTriggerButtonView(
             context = context,
             isShizukuModeProvider = {
-                touchInjector.getActiveBackend() == TouchInjector.ActiveBackend.SHIZUKU_INPUT_MANAGER
+                touchInjector.isMuxMerging()
             },
             isMacroRunningProvider = {
                 macroEngine.isRunning()
@@ -221,12 +222,42 @@ class OverlayController private constructor(
         registerVolumeUpReceiver()
 
         isShowing = true
-        val tip = if (touchInjector.isShizukuReady()) {
-            "按住悬浮钮连点开火，其他手指可正常走位/瞄准。编辑：音量+ 或连点钮3下"
-        } else {
-            "尚未授权 Shizuku：按住开火会拒绝启动（否则会打断走位）。请先开 Shizuku"
+
+        // 启动 TouchMux：必须短暂无触摸才能 EVIOCGRAB，否则会拖枪即断
+        mainHandler.post {
+            if (!touchInjector.isShizukuReady()) {
+                Toast.makeText(
+                    context,
+                    "请先授权 Shizuku，并打开「USB 调试（安全设置）」",
+                    Toast.LENGTH_LONG
+                ).show()
+                return@post
+            }
+            Toast.makeText(
+                context,
+                "正在启用多指通道：请松开屏幕全部手指…",
+                Toast.LENGTH_SHORT
+            ).show()
+            Thread {
+                val ok = touchInjector.ensureMuxReady()
+                mainHandler.post {
+                    if (ok) {
+                        Toast.makeText(
+                            context,
+                            "✅ 多指通道已就绪：按住开火键连点，可同时拖枪/走位。编辑：音量+ 或连点钮3下",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        val err = touchInjector.muxError() ?: "unknown"
+                        Toast.makeText(
+                            context,
+                            "多指通道未就绪（$err）。请松开全部手指后再开一次悬浮键，或先按住开火键时会自动重试",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }.start()
         }
-        Toast.makeText(context, tip, Toast.LENGTH_LONG).show()
     }
 
     /**
@@ -265,6 +296,7 @@ class OverlayController private constructor(
         if (!isShowing) return
         unregisterVolumeUpReceiver()
         macroEngine.forceStop()
+        touchInjector.releaseMux()
         dismissStepInspectorPopup()
         detachTargetEditor()
 

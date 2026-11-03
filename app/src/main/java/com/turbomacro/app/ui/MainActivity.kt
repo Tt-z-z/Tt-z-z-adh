@@ -296,9 +296,9 @@ class MainActivity : AppCompatActivity() {
         val accReady = MacroAccessibilityService.instance != null
 
         statusChannelText.text = if (shizukuReady) {
-            "● 当前触控通道：Shizuku 原生 InputManager 引擎（已激活 · 支持多指并发零冲突）"
+            "● 当前触控通道：Shizuku + TouchMux 多指合并引擎（已激活 · 拖枪走位不中断）"
         } else {
-            "○ 当前触控通道：标准无障碍手势通道（激活 Shizuku 可解锁多指按住并发）"
+            "○ 当前触控通道：标准通道（请授权 Shizuku 解锁多指并发拖枪）"
         }
 
         statusAccessibilityText.text = if (accReady) {
