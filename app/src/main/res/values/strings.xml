@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">TurboMacro 极速宏</string>
+    <string name="accessibility_service_desc">用于提供类小米 Game Turbo 的按住连发宏、手势回放与零遮挡悬浮准星，纯内存运行，不收集任何界面隐私数据。</string>
+</resources>
