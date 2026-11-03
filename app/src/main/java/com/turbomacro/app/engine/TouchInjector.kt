@@ -23,28 +23,25 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 
 /**
- * 双模安全触控注入器（针对 60Hz/120Hz 游戏引擎帧采样与多指防冲突深度调优）：
+ * 双模触控注入器（多指并发不抢指 · 不卡游戏操作）
  *
- * 为什么之前「有特效但游戏内点击不生效」？
- * 1. 无障碍通道下：当你手指按住触发键（Window A）时，Android 系统默认拒绝通过 dispatchGesture
- *    向底部游戏窗口（Window B）注入第二根手指，导致 dispatchGesture 直接返回 false 被静默丢弃！
- * 2. Shizuku 通道下：之前 pointerId 固定写死为 0，与你按住触发键的物理手指 pointerId=0 发生 ID 碰撞，
- *    且 14ms 的按压时间在 60fps 游戏中（1帧=16.67ms）经常落在两帧轮询间隙内被游戏引擎漏检！
+ * 【按住宏时屏幕其他操作失灵】的根因：
+ * 1. Shizuku 通道：虚拟点击若使用真实触控屏同一 `deviceId` / pointerId=0，
+ *    InputDispatcher 会把「走位手指」和「宏点击」当成同一根手指，导致摇杆/滑动被抢走。
+ * 2. 无障碍通道：`dispatchGesture` 会取消屏幕上正在进行的其他手势。
  *
- * 修复方案：
- * - Shizuku 通道：
- *   1. 使用独立虚拟触控点 ID 并完整构造符合真机电容屏特征的 PointerCoords（touchMajor/Minor/size/pressure）。
- *   2. 按压期间每 8ms 发送一次微小 ACTION_MOVE 保活帧，且最短有效按压 >= 26ms（跨越至少 2 个游戏渲染帧），确保 Unity/Unreal 100% 识别按下与抬起。
- * - 无障碍通道：
- *   1. 当检测到处于无障碍模式（未开 Shizuku）时，触发键支持「点一下触发键开启连发、再点一下立即停止」或「松手触发」，避开物理手指占住屏幕导致的系统多窗口手势互斥锁！
- *   2. 传入主线程 Handler 并在 Path 中加入 0.5px 微位移（部分 ROM 对长度为 0 的 Path 不触发游戏内 TouchDown）。
+ * 修复：
+ * - Shizuku：使用独立虚拟触控设备 ID (`VIRTUAL_TOUCH_DEVICE_ID`)，与物理屏幕手指完全隔离。
+ * - 无障碍：绝不在「物理手指仍按住悬浮键」时注入；仅用于松手后的点按模式，且不回退打断并发。
  */
 class TouchInjector {
 
     companion object {
         private const val TAG = "TouchInjector"
         private const val INJECT_INPUT_EVENT_MODE_ASYNC = 0
-        private const val INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT = 1
+        /** 独立虚拟触控设备，避免与物理触控屏抢 pointer */
+        private const val VIRTUAL_TOUCH_DEVICE_ID = 0x7E57_C0DE
+        private const val VIRTUAL_POINTER_ID = 0
     }
 
     enum class ActiveBackend {
@@ -78,18 +75,19 @@ class TouchInjector {
     }
 
     /**
-     * 执行游戏级高可靠单点按压
+     * @param allowAccessibilityFallback 仅在「手指已离开悬浮键」的点按模式允许降级无障碍；
+     *   按住并发连发时必须为 false，否则 dispatchGesture 会打断游戏内其他手指。
      */
     suspend fun injectTap(
         service: AccessibilityService?,
         x: Float,
         y: Float,
         holdMs: Long,
-        isStillHoldingTrigger: () -> Boolean
+        isStillHoldingTrigger: () -> Boolean,
+        allowAccessibilityFallback: Boolean = false
     ): Boolean {
         if (!isStillHoldingTrigger()) return false
 
-        // 游戏引擎（Unity/UE4/Cocos）至少需要跨越 1.5~2 个逻辑帧（>= 25ms）才能稳定判定一次有效点击
         val effectiveHoldMs = holdMs.coerceAtLeast(26L)
 
         if (isShizukuReady() && tryInitShizukuInputManager()) {
@@ -104,15 +102,14 @@ class TouchInjector {
                     y = y
                 )
                 if (!ok) {
-                    // 若 Shizuku 注入失败，立即降级尝试无障碍手势
-                    if (service != null) {
+                    // 按住并发时禁止降级无障碍，避免抢掉游戏手指
+                    if (allowAccessibilityFallback && service != null) {
                         return dispatchAccessibilityTap(service, x, y, effectiveHoldMs)
                     }
                     return false
                 }
                 pressed = true
 
-                // 在按住期间每 8ms 发送一次极微小的 ACTION_MOVE 保活帧，让游戏引擎 100% 捕获触控态
                 var remaining = effectiveHoldMs
                 var stepCount = 0
                 while (remaining > 0 && isStillHoldingTrigger()) {
@@ -120,38 +117,35 @@ class TouchInjector {
                     delay(slice)
                     remaining -= slice
                     stepCount++
+                    // 保活 MOVE：仍走虚拟设备，不触碰物理手指
                     if (remaining > 0 && stepCount % 2 == 0) {
                         injectMotionEventViaShizuku(
                             downTime = downTime,
                             eventTime = SystemClock.uptimeMillis(),
                             action = MotionEvent.ACTION_MOVE,
-                            x = x + 0.3f,
-                            y = y + 0.3f
+                            x = x + 0.25f,
+                            y = y + 0.25f
                         )
                     }
                 }
                 return true
             } finally {
                 if (pressed) {
-                    val upTime = SystemClock.uptimeMillis()
                     injectMotionEventViaShizuku(
                         downTime = downTime,
-                        eventTime = upTime,
+                        eventTime = SystemClock.uptimeMillis(),
                         action = MotionEvent.ACTION_UP,
                         x = x,
                         y = y
                     )
                 }
             }
-        } else if (service != null) {
+        } else if (allowAccessibilityFallback && service != null) {
             return dispatchAccessibilityTap(service, x, y, effectiveHoldMs)
         }
         return false
     }
 
-    /**
-     * 执行滑动，支持松手随时中断并安全抬起
-     */
     suspend fun injectSwipe(
         service: AccessibilityService?,
         startX: Float,
@@ -159,7 +153,8 @@ class TouchInjector {
         endX: Float,
         endY: Float,
         durationMs: Long,
-        isStillHoldingTrigger: () -> Boolean
+        isStillHoldingTrigger: () -> Boolean,
+        allowAccessibilityFallback: Boolean = false
     ): Boolean {
         if (!isStillHoldingTrigger()) return false
 
@@ -182,8 +177,10 @@ class TouchInjector {
                     startY
                 )
                 if (!ok) {
-                    if (service != null) {
-                        return dispatchAccessibilitySwipe(service, startX, startY, endX, endY, totalDuration)
+                    if (allowAccessibilityFallback && service != null) {
+                        return dispatchAccessibilitySwipe(
+                            service, startX, startY, endX, endY, totalDuration
+                        )
                     }
                     return false
                 }
@@ -214,7 +211,7 @@ class TouchInjector {
                     )
                 }
             }
-        } else if (service != null) {
+        } else if (allowAccessibilityFallback && service != null) {
             return dispatchAccessibilitySwipe(service, startX, startY, endX, endY, totalDuration)
         }
         return false
@@ -241,13 +238,16 @@ class TouchInjector {
             injectMethodParamCount = method.parameterTypes.size
             true
         } catch (e: Throwable) {
-            Log.w(TAG, "Shizuku IInputManager init failed, fallback to Accessibility", e)
+            Log.w(TAG, "Shizuku IInputManager init failed", e)
             iInputManagerProxy = null
             injectEventMethod = null
             false
         }
     }
 
+    /**
+     * 通过独立虚拟触控设备注入，物理屏幕上的走位/瞄准手指不受影响。
+     */
     private fun injectMotionEventViaShizuku(
         downTime: Long,
         eventTime: Long,
@@ -256,7 +256,7 @@ class TouchInjector {
         y: Float
     ): Boolean {
         val props = arrayOf(MotionEvent.PointerProperties().apply {
-            id = 0
+            id = VIRTUAL_POINTER_ID
             toolType = MotionEvent.TOOL_TYPE_FINGER
         })
         val isUp = action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL
@@ -264,11 +264,11 @@ class TouchInjector {
             this.x = x
             this.y = y
             pressure = if (isUp) 0f else 1.0f
-            size = if (isUp) 0f else 0.5f
-            touchMajor = if (isUp) 0f else 12f
-            touchMinor = if (isUp) 0f else 10f
-            toolMajor = if (isUp) 0f else 12f
-            toolMinor = if (isUp) 0f else 10f
+            size = if (isUp) 0f else 0.45f
+            touchMajor = if (isUp) 0f else 11f
+            touchMinor = if (isUp) 0f else 9f
+            toolMajor = if (isUp) 0f else 11f
+            toolMinor = if (isUp) 0f else 9f
         })
         val event = MotionEvent.obtain(
             downTime,
@@ -281,7 +281,7 @@ class TouchInjector {
             0,
             1.0f,
             1.0f,
-            -1, // deviceId = -1 (VIRTUAL_KEYBOARD / VIRTUAL_TOUCH)
+            VIRTUAL_TOUCH_DEVICE_ID,
             0,
             InputDevice.SOURCE_TOUCHSCREEN,
             0
@@ -289,9 +289,10 @@ class TouchInjector {
         return try {
             val method = injectEventMethod ?: return false
             val proxy = iInputManagerProxy ?: return false
+            // ASYNC：不阻塞，避免拖慢游戏触控流水线
             val result = when (injectMethodParamCount) {
-                2 -> method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT)
-                3 -> method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_WAIT_FOR_RESULT, -1)
+                2 -> method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_ASYNC)
+                3 -> method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_ASYNC, -1)
                 else -> false
             }
             (result as? Boolean) ?: true
@@ -311,11 +312,9 @@ class TouchInjector {
         y: Float,
         durationMs: Long
     ): Boolean {
-        // 加上 400ms 超时保护，绝不因为系统手势回调丢失而卡死协程
         return withTimeoutOrNull(durationMs + 350L) {
             suspendCancellableCoroutine { cont ->
                 val resumed = AtomicBoolean(false)
-                // 加入 0.6px 微位移，防止部分小米/vivo ROM 忽略零长度 Path 而不向游戏分发 DOWN/UP
                 val path = Path().apply {
                     moveTo(x, y)
                     lineTo(x + 0.6f, y + 0.6f)

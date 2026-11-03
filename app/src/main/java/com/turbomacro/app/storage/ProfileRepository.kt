@@ -36,6 +36,7 @@ class ProfileRepository(context: Context) {
             enableHaptics = true,
             enableRipple = true,
             triggerAlpha = 0.38f,
+            triggerSizeDp = 54,
             triggerX = 160,
             triggerY = 760,
             steps = mutableListOf(

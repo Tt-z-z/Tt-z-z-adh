@@ -75,6 +75,12 @@ class HoldToRunMacroEngine(
                             }
                         }
 
+                        // Shizuku 按住连发：禁止降级无障碍（dispatchGesture 会打断游戏其他手指）
+                        // 无障碍点按模式：允许无障碍注入（此时手指已离开悬浮键）
+                        val shizukuActive = touchInjector.getActiveBackend() ==
+                            TouchInjector.ActiveBackend.SHIZUKU_INPUT_MANAGER
+                        val allowAccFallback = !shizukuActive
+
                         val injectedOk = when (step.type) {
                             ActionType.TAP -> {
                                 touchInjector.injectTap(
@@ -82,7 +88,8 @@ class HoldToRunMacroEngine(
                                     x = actualX,
                                     y = actualY,
                                     holdMs = step.holdDurationMs,
-                                    isStillHoldingTrigger = { isHolding.get() && isActive }
+                                    isStillHoldingTrigger = { isHolding.get() && isActive },
+                                    allowAccessibilityFallback = allowAccFallback
                                 )
                             }
                             ActionType.SWIPE -> {
@@ -93,7 +100,8 @@ class HoldToRunMacroEngine(
                                     endX = (step.endX + offsetX).coerceAtLeast(1f),
                                     endY = (step.endY + offsetY).coerceAtLeast(1f),
                                     durationMs = step.holdDurationMs.coerceAtLeast(32L),
-                                    isStillHoldingTrigger = { isHolding.get() && isActive }
+                                    isStillHoldingTrigger = { isHolding.get() && isActive },
+                                    allowAccessibilityFallback = allowAccFallback
                                 )
                             }
                         }

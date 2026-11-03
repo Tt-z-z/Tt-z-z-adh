@@ -164,10 +164,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val guideText = TextView(this).apply {
-            text = "使用说明（v1.1 全面进化）：\n" +
-                "1. 启动悬浮窗后，顶部「战斗态」胶囊条已彻底隐藏，仅留微透触发圆环，全屏零遮挡！\n" +
-                "2. 按一下手机侧边【音量+】键 -> 立即进入【✏️ 编辑模式】，可拖拽触发键、添加靶点或录制手势；再按一下【音量+】（或点完成锁定）立即重新隐身！\n" +
-                "3. 若开启了 Shizuku：支持手指按住触发键并发连点，松手立停；若仅开无障碍服务：轻点触发键开始极速连发，再碰一下触发键 0ms 立即停止（彻底解决手指按住悬浮窗时系统拦截游戏点击的问题）！"
+            text = "使用说明（v1.3 多指不抢指）：\n" +
+                "1. 强烈建议开启 Shizuku：按住触发键连发时，左手走位/瞄准不再失灵（虚拟触控与物理手指隔离）。\n" +
+                "2. 按【音量+】或快速连点触发键 3 下进入编辑；下方可调节触发键大小与透明度。\n" +
+                "3. 仅开无障碍时：请用「轻点一下开始 / 再点停止」，不要指望按住同时操作屏幕（系统无障碍会打断其他手指）。"
             setTextColor(Color.parseColor("#90A4AE"))
             textSize = 12.5f
             setPadding(0, dp(12), 0, 0)
@@ -230,6 +230,32 @@ class MainActivity : AppCompatActivity() {
             }
         }
         feelCard.addView(rippleSwitch)
+
+        // 触发键大小调节
+        val sizeLabel = TextView(this).apply {
+            text = "触发键大小: ${profile.triggerSizeDp} dp（推荐 44~64，越小越不挡视野）"
+            setTextColor(Color.parseColor("#B0BEC5"))
+            textSize = 13f
+            setPadding(0, dp(6), 0, dp(4))
+        }
+        val sizeSeek = SeekBar(this).apply {
+            max = 60
+            progress = (profile.triggerSizeDp - 36).coerceIn(0, 60)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                    val sizeDp = p + 36
+                    sizeLabel.text = "触发键大小: $sizeDp dp（推荐 44~64，越小越不挡视野）"
+                    val cfg = repository.loadProfile()
+                    cfg.triggerSizeDp = sizeDp
+                    repository.saveProfile(cfg)
+                    getActiveOverlayController().reloadProfileAndRefresh()
+                }
+                override fun onStartTrackingTouch(s: SeekBar?) {}
+                override fun onStopTrackingTouch(s: SeekBar?) {}
+            })
+        }
+        feelCard.addView(sizeLabel)
+        feelCard.addView(sizeSeek)
 
         // 触发键闲置透明度调节
         val alphaLabel = TextView(this).apply {

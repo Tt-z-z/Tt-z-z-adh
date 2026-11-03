@@ -162,13 +162,16 @@ class OverlayController private constructor(
         rippleOverlay = ripple
 
         // 2. 挂载按住触发键
-        val sizePx = dpToPx(54)
+        // FLAG_NOT_TOUCH_MODAL：窗口外触控直接穿透到游戏，绝不吃掉走位/瞄准手指
+        val sizePx = dpToPx(currentProfile.triggerSizeDp.coerceIn(36, 96))
         val triggerLp = WindowManager.LayoutParams(
             sizePx,
             sizePx,
             getOverlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
@@ -284,7 +287,26 @@ class OverlayController private constructor(
     fun reloadProfileAndRefresh() {
         currentProfile = repository.loadProfile()
         triggerButton?.idleAlpha = currentProfile.triggerAlpha
+        applyTriggerButtonSize(currentProfile.triggerSizeDp)
         targetEditorOverlay?.invalidate()
+    }
+
+    /** 动态调整触发圆环大小（36~96 dp） */
+    fun applyTriggerButtonSize(sizeDp: Int) {
+        val lp = triggerParams ?: return
+        val btn = triggerButton ?: return
+        val sizePx = dpToPx(sizeDp.coerceIn(36, 96))
+        if (lp.width == sizePx && lp.height == sizePx) {
+            btn.invalidate()
+            return
+        }
+        lp.width = sizePx
+        lp.height = sizePx
+        try {
+            windowManager.updateViewLayout(btn, lp)
+        } catch (_: Throwable) {
+        }
+        btn.invalidate()
     }
 
     private fun registerVolumeUpReceiver() {
@@ -324,6 +346,8 @@ class OverlayController private constructor(
         }
 
         val lockBtn = createCapsuleTextButton("✅ 完成锁定(或按音量+)")
+        val sizeSmallBtn = createCapsuleTextButton("键缩小")
+        val sizeBigBtn = createCapsuleTextButton("键放大")
         val addTapBtn = createCapsuleTextButton("+靶点")
         val addSwipeBtn = createCapsuleTextButton("+划屏")
         val recordBtn = createCapsuleTextButton("● 录制")
@@ -333,6 +357,21 @@ class OverlayController private constructor(
             if (!isCombatLocked) {
                 toggleCombatEditMode()
             }
+        }
+
+        sizeSmallBtn.setOnClickListener {
+            val next = (currentProfile.triggerSizeDp - 6).coerceIn(36, 96)
+            currentProfile.triggerSizeDp = next
+            repository.saveProfile(currentProfile)
+            applyTriggerButtonSize(next)
+            Toast.makeText(context, "触发键: ${next}dp", Toast.LENGTH_SHORT).show()
+        }
+        sizeBigBtn.setOnClickListener {
+            val next = (currentProfile.triggerSizeDp + 6).coerceIn(36, 96)
+            currentProfile.triggerSizeDp = next
+            repository.saveProfile(currentProfile)
+            applyTriggerButtonSize(next)
+            Toast.makeText(context, "触发键: ${next}dp", Toast.LENGTH_SHORT).show()
         }
 
         addTapBtn.setOnClickListener {
@@ -417,6 +456,8 @@ class OverlayController private constructor(
         }
 
         container.addView(lockBtn)
+        container.addView(sizeSmallBtn)
+        container.addView(sizeBigBtn)
         container.addView(addTapBtn)
         container.addView(addSwipeBtn)
         container.addView(recordBtn)
@@ -427,6 +468,7 @@ class OverlayController private constructor(
             WindowManager.LayoutParams.WRAP_CONTENT,
             getOverlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {
@@ -458,6 +500,7 @@ class OverlayController private constructor(
             WindowManager.LayoutParams.MATCH_PARENT,
             getOverlayWindowType(),
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         ).apply {

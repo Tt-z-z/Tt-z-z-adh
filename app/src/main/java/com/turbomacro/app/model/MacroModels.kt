@@ -77,6 +77,8 @@ data class MacroProfile(
     var enableHaptics: Boolean = true,
     var enableRipple: Boolean = true,
     var triggerAlpha: Float = 0.35f,
+    /** 触发圆环直径 (dp)，建议 36~96 */
+    var triggerSizeDp: Int = 54,
     var triggerX: Int = 180,
     var triggerY: Int = 800,
     val steps: MutableList<MacroStep> = mutableListOf()
@@ -87,6 +89,7 @@ data class MacroProfile(
         put("enableHaptics", enableHaptics)
         put("enableRipple", enableRipple)
         put("triggerAlpha", triggerAlpha.toDouble())
+        put("triggerSizeDp", triggerSizeDp)
         put("triggerX", triggerX)
         put("triggerY", triggerY)
         val arr = JSONArray()
@@ -109,6 +112,7 @@ data class MacroProfile(
                 enableHaptics = obj.optBoolean("enableHaptics", true),
                 enableRipple = obj.optBoolean("enableRipple", true),
                 triggerAlpha = obj.optDouble("triggerAlpha", 0.35).toFloat(),
+                triggerSizeDp = obj.optInt("triggerSizeDp", 54).coerceIn(36, 96),
                 triggerX = obj.optInt("triggerX", 180),
                 triggerY = obj.optInt("triggerY", 800),
                 steps = stepsList
