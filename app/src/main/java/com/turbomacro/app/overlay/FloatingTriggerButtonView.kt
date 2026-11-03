@@ -12,7 +12,7 @@ import kotlin.math.abs
 
 /**
  * 悬浮开火键：战斗态 = 按住连发、松开即停。
- * 必须配合 Shizuku；无 Shizuku 时 onHoldStart 内部会拒绝，避免无障碍清掉其他手指。
+ * 必须 TouchMux 已 ENGAGE；未就绪时引擎会拒绝，绝不走会打断拖枪的 input tap / 无障碍。
  */
 @SuppressLint("ViewConstructor")
 class FloatingTriggerButtonView(

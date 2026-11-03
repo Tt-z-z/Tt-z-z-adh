@@ -15,11 +15,13 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * 常驻 TouchMux 进程客户端（经 Shizuku 以 shell 身份 exec libtouchmux.so）。
  *
- * 负责：ENGAGE 抢占真屏并合并多指、TAP 走同一虚拟设备的额外槽、PING 保活。
+ * ENGAGE 抢占真屏并合并多指；TAP 走同一虚拟设备额外槽；PING 保活（不与 TAP 死锁）。
  */
 class TouchMuxClient(private val appContext: Context) {
 
@@ -28,9 +30,8 @@ class TouchMuxClient(private val appContext: Context) {
         private const val LIB_NAME = "libtouchmux.so"
     }
 
-    private val lock = Any()
+    private val lock = ReentrantLock()
     private val merging = AtomicBoolean(false)
-    private val ready = AtomicBoolean(false)
     private val lastError = AtomicReference<String?>(null)
 
     private var remoteProcess: Any? = null
@@ -58,7 +59,7 @@ class TouchMuxClient(private val appContext: Context) {
 
     /** 启动 helper（若未启动）并 ENGAGE。需要用户短暂抬起所有手指。 */
     fun ensureMerging(): Boolean {
-        synchronized(lock) {
+        lock.withLock {
             if (!isShizukuReady()) {
                 lastError.set("shizuku_not_ready")
                 return false
@@ -83,15 +84,15 @@ class TouchMuxClient(private val appContext: Context) {
     }
 
     fun tap(x: Int, y: Int, holdMs: Int): Boolean {
-        synchronized(lock) {
+        lock.withLock {
             if (!merging.get()) return false
-            val resp = sendAndWaitLocked("TAP $x $y $holdMs", timeoutMs = 400L) ?: return false
+            val resp = sendAndWaitLocked("TAP $x $y $holdMs", timeoutMs = 350L) ?: return false
             return resp.startsWith("OK")
         }
     }
 
     fun release() {
-        synchronized(lock) {
+        lock.withLock {
             stopHeartbeatLocked()
             try {
                 sendAndWaitLocked("RELEASE", timeoutMs = 800L)
@@ -116,26 +117,53 @@ class TouchMuxClient(private val appContext: Context) {
     }
 
     private fun findBinary(): File? {
+        // Prefer a writable copy we can chmod +x
+        val cached = File(appContext.filesDir, LIB_NAME)
         val nativeDir = appContext.applicationInfo.nativeLibraryDir
         val direct = File(nativeDir, LIB_NAME)
-        if (direct.exists() && direct.canRead()) return direct
 
-        // 某些安装路径 / split APK
-        val ai: ApplicationInfo = appContext.applicationInfo
-        val candidates = listOfNotNull(
-            ai.nativeLibraryDir,
-            ai.sourceDir?.let { File(it).parent },
-            ai.publicSourceDir?.let { File(it).parent }
-        )
-        for (c in candidates) {
-            val f = File(c, LIB_NAME)
-            if (f.exists()) return f
-            val abi = File(c, "arm64-v8a/$LIB_NAME")
-            if (abi.exists()) return abi
-            val abi2 = File(c, "lib/arm64-v8a/$LIB_NAME")
-            if (abi2.exists()) return abi2
+        val source = when {
+            direct.exists() && direct.length() > 8_000L -> direct
+            else -> {
+                val ai: ApplicationInfo = appContext.applicationInfo
+                val candidates = listOfNotNull(
+                    ai.nativeLibraryDir,
+                    ai.sourceDir?.let { File(it).parent },
+                    ai.publicSourceDir?.let { File(it).parent }
+                )
+                var found: File? = null
+                for (c in candidates) {
+                    val f = File(c, LIB_NAME)
+                    if (f.exists() && f.length() > 8_000L) {
+                        found = f
+                        break
+                    }
+                    val abi = File(c, "arm64-v8a/$LIB_NAME")
+                    if (abi.exists() && abi.length() > 8_000L) {
+                        found = abi
+                        break
+                    }
+                }
+                found
+            }
+        } ?: return if (cached.exists() && cached.length() > 8_000L) cached else null
+
+        return try {
+            if (!cached.exists() || cached.length() != source.length() ||
+                cached.lastModified() < source.lastModified()
+            ) {
+                source.inputStream().use { inp ->
+                    cached.outputStream().use { out -> inp.copyTo(out) }
+                }
+            }
+            cached.setReadable(true, false)
+            cached.setExecutable(true, false)
+            cached
+        } catch (e: Throwable) {
+            Log.w(TAG, "cache copy failed, using source: ${e.message}")
+            source.setExecutable(true, false)
+            source
         }
-        return null
     }
 
     private fun startProcessLocked(): Boolean {
@@ -143,7 +171,7 @@ class TouchMuxClient(private val appContext: Context) {
         val bin = findBinary()
         if (bin == null) {
             lastError.set("missing_libtouchmux")
-            Log.e(TAG, "libtouchmux.so not found in nativeLibraryDir")
+            Log.e(TAG, "libtouchmux.so not found")
             return false
         }
         return try {
@@ -157,8 +185,12 @@ class TouchMuxClient(private val appContext: Context) {
             val remote = method.invoke(null, arrayOf(bin.absolutePath), null, null)
                 ?: return false.also { lastError.set("newProcess_null") }
 
-            val getInput = remote.javaClass.methods.first { it.name == "getInputStream" && it.parameterTypes.isEmpty() }
-            val getOutput = remote.javaClass.methods.first { it.name == "getOutputStream" && it.parameterTypes.isEmpty() }
+            val getInput = remote.javaClass.methods.first {
+                it.name == "getInputStream" && it.parameterTypes.isEmpty()
+            }
+            val getOutput = remote.javaClass.methods.first {
+                it.name == "getOutputStream" && it.parameterTypes.isEmpty()
+            }
             val input = getInput.invoke(remote) as java.io.InputStream
             val output = getOutput.invoke(remote) as java.io.OutputStream
 
@@ -172,7 +204,6 @@ class TouchMuxClient(private val appContext: Context) {
                 destroyProcessLocked()
                 return false
             }
-            ready.set(true)
             true
         } catch (e: Throwable) {
             Log.e(TAG, "startProcess failed", e)
@@ -184,7 +215,6 @@ class TouchMuxClient(private val appContext: Context) {
 
     private fun sendAndWaitLocked(cmd: String, timeoutMs: Long): String? {
         val w = writer ?: return null
-        val r = reader ?: return null
         return try {
             w.write(cmd)
             w.write("\n")
@@ -212,15 +242,19 @@ class TouchMuxClient(private val appContext: Context) {
     private fun startHeartbeatLocked() {
         stopHeartbeatLocked()
         heartbeat = scheduler.scheduleAtFixedRate({
-            synchronized(lock) {
+            // 不与 TAP 死等：抢不到锁就跳过本轮
+            if (!lock.tryLock()) return@scheduleAtFixedRate
+            try {
                 if (!merging.get()) return@scheduleAtFixedRate
-                val resp = sendAndWaitLocked("PING", timeoutMs = 500L)
+                val resp = sendAndWaitLocked("PING", timeoutMs = 400L)
                 if (resp == null || !resp.startsWith("OK")) {
                     Log.w(TAG, "heartbeat lost: $resp")
                     merging.set(false)
                 }
+            } finally {
+                lock.unlock()
             }
-        }, 400L, 700L, TimeUnit.MILLISECONDS)
+        }, 500L, 800L, TimeUnit.MILLISECONDS)
     }
 
     private fun stopHeartbeatLocked() {
@@ -247,7 +281,6 @@ class TouchMuxClient(private val appContext: Context) {
         reader = null
         val remote = remoteProcess
         remoteProcess = null
-        ready.set(false)
         merging.set(false)
         if (remote != null) {
             try {

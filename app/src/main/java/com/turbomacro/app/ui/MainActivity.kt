@@ -295,10 +295,11 @@ class MainActivity : AppCompatActivity() {
         val shizukuReady = ctrl.touchInjector.isShizukuReady()
         val accReady = MacroAccessibilityService.instance != null
 
-        statusChannelText.text = if (shizukuReady) {
-            "● 当前触控通道：Shizuku + TouchMux 多指合并引擎（已激活 · 拖枪走位不中断）"
-        } else {
-            "○ 当前触控通道：标准通道（请授权 Shizuku 解锁多指并发拖枪）"
+        val muxReady = ctrl.touchInjector.isMuxMerging()
+        statusChannelText.text = when {
+            muxReady -> "● 触控通道：TouchMux 多指合并（已 ENGAGE · 可拖枪同时连发）"
+            shizukuReady -> "○ Shizuku 已授权，悬浮键开启后会抢占触控屏做多指合并（请先松开手指）"
+            else -> "○ 未授权 Shizuku：无法安全连发（input tap 会打断拖枪）。请先授权"
         }
 
         statusAccessibilityText.text = if (accReady) {
