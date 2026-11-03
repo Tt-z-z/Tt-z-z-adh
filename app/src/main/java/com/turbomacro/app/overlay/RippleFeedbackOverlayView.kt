@@ -28,6 +28,9 @@ class RippleFeedbackOverlayView(context: Context) : View(context) {
 
     private val particles = CopyOnWriteArrayList<RippleParticle>()
 
+    // 预分配屏幕坐标数组，避免在 120Hz onDraw 中产生 GC 抖动
+    private val screenLoc = IntArray(2)
+
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeWidth = 4.5f
@@ -73,6 +76,10 @@ class RippleFeedbackOverlayView(context: Context) : View(context) {
         val now = SystemClock.uptimeMillis()
         var hasAlive = false
 
+        getLocationOnScreen(screenLoc)
+        val winOffsetX = screenLoc[0].toFloat()
+        val winOffsetY = screenLoc[1].toFloat()
+
         for (p in particles) {
             val elapsed = now - p.birthTimeMs
             if (elapsed >= p.durationMs) {
@@ -92,19 +99,16 @@ class RippleFeedbackOverlayView(context: Context) : View(context) {
             ringPaint.alpha = alpha
             corePaint.alpha = (alpha * 0.65f).toInt()
 
-            // 因 Window 是全屏状态栏下或全屏坐标系，将屏幕绝对坐标转换为本 View 局部坐标
-            val loc = IntArray(2)
-            getLocationOnScreen(loc)
-            val localX = p.x - loc[0]
-            val localY = p.y - loc[1]
+            val localX = p.x - winOffsetX
+            val localY = p.y - winOffsetY
 
             canvas.drawCircle(localX, localY, 7f * (1f - progress * 0.5f), corePaint)
             canvas.drawCircle(localX, localY, currentRadius, ringPaint)
 
             // 若是滑动步骤，绘制流光轨迹线
             if (p.endX != null && p.endY != null) {
-                val localEndX = p.endX - loc[0]
-                val localEndY = p.endY - loc[1]
+                val localEndX = p.endX - winOffsetX
+                val localEndY = p.endY - winOffsetY
                 trailPaint.alpha = alpha
                 val curTrailX = localX + (localEndX - localX) * eased
                 val curTrailY = localY + (localEndY - localY) * eased

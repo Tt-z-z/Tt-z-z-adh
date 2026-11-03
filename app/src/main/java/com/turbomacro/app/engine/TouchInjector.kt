@@ -4,21 +4,26 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.pm.PackageManager
 import android.graphics.Path
+import android.os.IBinder
 import android.os.SystemClock
 import android.util.Log
 import android.view.InputDevice
+import android.view.InputEvent
 import android.view.MotionEvent
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import rikka.shizuku.Shizuku
+import rikka.shizuku.ShizukuBinderWrapper
+import rikka.shizuku.SystemServiceHelper
 import java.lang.reflect.Method
 import kotlin.coroutines.resume
 
 /**
  * 双模安全触控注入器（零系统损伤保证）：
  *
- * 1. Shizuku (ADB 级 InputManager 通道) [首选]：
- *    - 原理与小米 Game Turbo 原生虚拟肩键完全一致，直接向系统 InputManager 投递合成 MotionEvent。
+ * 1. Shizuku (ADB 级 IInputManager Binder 代理通道) [首选]：
+ *    - 通过 ShizukuBinderWrapper 包装系统 "input" 服务，以 ADB Shell (UID 2000) 权限调用
+ *      IInputManager.injectInputEvent，原理与小米 Game Turbo 原生虚拟肩键完全一致。
  *    - 支持左手按住屏幕移动/按住触发键的同时，毫秒级并发注入宏点击，互不打断。
  *    - 纯内存级 API 调用，不修改任何系统分区或驱动，随时关闭或卸载零残留。
  *
@@ -38,9 +43,13 @@ class TouchInjector {
         ACCESSIBILITY_GESTURE
     }
 
-    // 缓存反射句柄，避免每次点击重复反射带来额外延迟
-    private var inputManagerInstance: Any? = null
-    private var injectInputEventMethod: Method? = null
+    // 缓存 Shizuku IInputManager 代理实例与方法句柄，避免每次点击重复反射带来额外延迟
+    @Volatile
+    private var iInputManagerProxy: Any? = null
+    @Volatile
+    private var injectEventMethod: Method? = null
+    @Volatile
+    private var injectMethodParamCount: Int = 2
 
     /**
      * 检查当前是否可以使用 Shizuku 原生级注入
@@ -73,16 +82,16 @@ class TouchInjector {
     ) {
         if (!isStillHoldingTrigger()) return
 
-        if (isShizukuReady() && tryInitInputManager()) {
+        if (isShizukuReady() && tryInitShizukuInputManager()) {
             val downTime = SystemClock.uptimeMillis()
             var pressed = false
             try {
-                injectMotionEvent(downTime, downTime, MotionEvent.ACTION_DOWN, x, y)
+                injectMotionEventViaShizuku(downTime, downTime, MotionEvent.ACTION_DOWN, x, y)
                 pressed = true
-                // 分片等待：每 4ms 检查一次手指是否已松开，做到松手 4ms 内瞬间断触
+                // 分片等待：每 3ms 检查一次手指是否已松开，做到松手 3ms 内瞬间断触
                 var remaining = holdMs.coerceAtLeast(8L)
                 while (remaining > 0 && isStillHoldingTrigger()) {
-                    val step = minOf(remaining, 4L)
+                    val step = minOf(remaining, 3L)
                     delay(step)
                     remaining -= step
                 }
@@ -90,7 +99,7 @@ class TouchInjector {
                 if (pressed) {
                     // 安全收尾：无论协程正常结束还是因松手被 cancel，必发 ACTION_UP 释放触控点
                     val upTime = SystemClock.uptimeMillis()
-                    injectMotionEvent(downTime, upTime, MotionEvent.ACTION_UP, x, y)
+                    injectMotionEventViaShizuku(downTime, upTime, MotionEvent.ACTION_UP, x, y)
                 }
             }
         } else if (service != null) {
@@ -112,7 +121,7 @@ class TouchInjector {
     ) {
         if (!isStillHoldingTrigger()) return
 
-        if (isShizukuReady() && tryInitInputManager()) {
+        if (isShizukuReady() && tryInitShizukuInputManager()) {
             val downTime = SystemClock.uptimeMillis()
             val totalDuration = durationMs.coerceAtLeast(16L)
             val stepInterval = 8L // 125Hz 采样率平滑插值，媲美原生 120Hz 触控屏滑屏
@@ -122,7 +131,7 @@ class TouchInjector {
             var pressed = false
 
             try {
-                injectMotionEvent(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY)
+                injectMotionEventViaShizuku(downTime, downTime, MotionEvent.ACTION_DOWN, startX, startY)
                 pressed = true
                 for (i in 1..steps) {
                     if (!isStillHoldingTrigger()) break
@@ -130,7 +139,7 @@ class TouchInjector {
                     val fraction = i.toFloat() / steps
                     currentX = startX + (endX - startX) * fraction
                     currentY = startY + (endY - startY) * fraction
-                    injectMotionEvent(
+                    injectMotionEventViaShizuku(
                         downTime,
                         SystemClock.uptimeMillis(),
                         MotionEvent.ACTION_MOVE,
@@ -140,7 +149,7 @@ class TouchInjector {
                 }
             } finally {
                 if (pressed) {
-                    injectMotionEvent(
+                    injectMotionEventViaShizuku(
                         downTime,
                         SystemClock.uptimeMillis(),
                         MotionEvent.ACTION_UP,
@@ -154,56 +163,85 @@ class TouchInjector {
         }
     }
 
-    private fun tryInitInputManager(): Boolean {
-        if (inputManagerInstance != null && injectInputEventMethod != null) return true
+    /**
+     * 通过 ShizukuBinderWrapper 获取具有 shell 权限的 IInputManager 远程代理
+     */
+    private fun tryInitShizukuInputManager(): Boolean {
+        if (iInputManagerProxy != null && injectEventMethod != null) return true
         return try {
-            val imClass = Class.forName("android.hardware.input.InputManager")
-            val getInstance = imClass.getDeclaredMethod("getInstance")
-            getInstance.isAccessible = true
-            inputManagerInstance = getInstance.invoke(null)
+            val rawBinder: IBinder = SystemServiceHelper.getSystemService("input") ?: return false
+            val wrappedBinder = ShizukuBinderWrapper(rawBinder)
+            val stubClass = Class.forName("android.hardware.input.IInputManager\$Stub")
+            val asInterfaceMethod = stubClass.getMethod("asInterface", IBinder::class.java)
+            val proxy = asInterfaceMethod.invoke(null, wrappedBinder) ?: return false
 
-            injectInputEventMethod = imClass.getMethod(
-                "injectInputEvent",
-                android.view.InputEvent::class.java,
-                Int::class.javaPrimitiveType
-            )
+            // 兼容不同 Android 版本 IInputManager.injectInputEvent 的方法签名 (2参或3参)
+            val method = proxy.javaClass.methods.firstOrNull { m ->
+                m.name == "injectInputEvent" &&
+                    m.parameterTypes.size >= 2 &&
+                    InputEvent::class.java.isAssignableFrom(m.parameterTypes[0])
+            } ?: return false
+
+            method.isAccessible = true
+            iInputManagerProxy = proxy
+            injectEventMethod = method
+            injectMethodParamCount = method.parameterTypes.size
             true
         } catch (e: Throwable) {
-            Log.w(TAG, "InputManager reflection fallback", e)
+            Log.w(TAG, "Shizuku IInputManager init failed, fallback to Accessibility", e)
+            iInputManagerProxy = null
+            injectEventMethod = null
             false
         }
     }
 
-    private fun injectMotionEvent(
+    private fun injectMotionEventViaShizuku(
         downTime: Long,
         eventTime: Long,
         action: Int,
         x: Float,
         y: Float
     ) {
+        val props = arrayOf(MotionEvent.PointerProperties().apply {
+            id = 0
+            toolType = MotionEvent.TOOL_TYPE_FINGER
+        })
+        val coords = arrayOf(MotionEvent.PointerCoords().apply {
+            this.x = x
+            this.y = y
+            pressure = if (action == MotionEvent.ACTION_UP) 0f else 1f
+            size = 1f
+        })
         val event = MotionEvent.obtain(
             downTime,
             eventTime,
             action,
-            x,
-            y,
-            1.0f, // pressure
-            1.0f, // size
+            1,
+            props,
+            coords,
+            0,
             0,
             1.0f,
             1.0f,
-            0, // deviceId = 0 (Virtual Touch Screen)
+            0,
+            0,
+            InputDevice.SOURCE_TOUCHSCREEN,
             0
         )
-        event.source = InputDevice.SOURCE_TOUCHSCREEN
         try {
-            injectInputEventMethod?.invoke(
-                inputManagerInstance,
-                event,
-                INJECT_INPUT_EVENT_MODE_ASYNC
-            )
+            val method = injectEventMethod ?: return
+            val proxy = iInputManagerProxy ?: return
+            if (injectMethodParamCount == 2) {
+                method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_ASYNC)
+            } else if (injectMethodParamCount == 3) {
+                // 部分 Android 13/14 ROM 签名为 injectInputEvent(InputEvent, int mode, int targetUid)
+                method.invoke(proxy, event, INJECT_INPUT_EVENT_MODE_ASYNC, -1)
+            }
         } catch (e: Throwable) {
-            Log.w(TAG, "injectMotionEvent error: ${e.message}")
+            Log.w(TAG, "injectMotionEventViaShizuku error: ${e.message}")
+            // 若 Binder 断开则清空缓存以便下次重连
+            iInputManagerProxy = null
+            injectEventMethod = null
         } finally {
             event.recycle()
         }

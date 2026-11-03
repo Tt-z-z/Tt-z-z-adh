@@ -59,7 +59,17 @@ class MainActivity : AppCompatActivity() {
 
     private fun getActiveOverlayController(): OverlayController {
         val svcController = MacroAccessibilityService.instance?.overlayController
-        if (svcController != null) return svcController
+        if (svcController != null) {
+            // 若之前在未开启无障碍时打开过独立悬浮窗，自动平滑迁移到无障碍承载实例，防止双悬浮窗重叠
+            standaloneOverlayController?.let { standalone ->
+                if (standalone.isOverlayShowing()) {
+                    standalone.hideOverlay()
+                    svcController.showOverlay()
+                }
+            }
+            standaloneOverlayController = null
+            return svcController
+        }
         if (standaloneOverlayController == null) {
             standaloneOverlayController = OverlayController(applicationContext) {
                 MacroAccessibilityService.instance

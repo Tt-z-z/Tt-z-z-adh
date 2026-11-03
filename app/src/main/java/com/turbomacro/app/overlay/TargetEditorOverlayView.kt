@@ -39,6 +39,7 @@ class TargetEditorOverlayView(
 
     private var draggingStep: MacroStep? = null
     private var draggingEndPoint: Boolean = false
+    private val screenLoc = IntArray(2)
 
     // 手势录制状态
     private var recordDownTimeMs = 0L
@@ -95,10 +96,9 @@ class TargetEditorOverlayView(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        val loc = IntArray(2)
-        getLocationOnScreen(loc)
-        val offsetX = loc[0].toFloat()
-        val offsetY = loc[1].toFloat()
+        getLocationOnScreen(screenLoc)
+        val offsetX = screenLoc[0].toFloat()
+        val offsetY = screenLoc[1].toFloat()
 
         // 顶部轻提示条
         val bannerText = if (isRecordingGesture) {

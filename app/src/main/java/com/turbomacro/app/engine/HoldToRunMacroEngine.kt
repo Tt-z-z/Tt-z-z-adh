@@ -8,7 +8,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -20,7 +19,8 @@ import kotlin.random.Random
  *
  * 特点：
  * - 零延迟按下响应：ACTION_DOWN 当帧立即启动协程并触发首点，不等任何 Timer 周期
- * - 毫秒级断触保障：AtomicBoolean + Coroutine Job 即时取消，松手 4ms 内终止一切输出
+ * - 毫秒级断触保障：AtomicBoolean + Coroutine Job 即时取消，松手 3ms 内终止一切输出
+ * - 并发安全快照：执行循环前对 steps 拍快照，防止编辑与连发并发导致 ConcurrentModificationException
  * - 支持拟真微颤偏移（jitterRadiusPx）：每次点击在靶心周围微小随机分布，媲美真人手指
  */
 class HoldToRunMacroEngine(
@@ -37,7 +37,8 @@ class HoldToRunMacroEngine(
      * 当手指按住悬浮触发键 (ACTION_DOWN) 时立即调用
      */
     fun onTriggerPressDown(service: AccessibilityService?, profile: MacroProfile) {
-        if (profile.steps.isEmpty()) return
+        val stepsSnapshot = profile.steps.map { it.copy() }
+        if (stepsSnapshot.isEmpty()) return
         if (!isHolding.compareAndSet(false, true)) return
 
         if (profile.enableHaptics) {
@@ -49,7 +50,7 @@ class HoldToRunMacroEngine(
         activeJob = scope.launch {
             try {
                 do {
-                    for (step in profile.steps) {
+                    for (step in stepsSnapshot) {
                         if (!isActive || !isHolding.get()) break
 
                         // 计算真人微颤随机偏移
@@ -96,10 +97,10 @@ class HoldToRunMacroEngine(
                             }
                         }
 
-                        // 步骤间隔等待（每 4ms 切片检查松手状态，保证随时松手零拖泥带水）
+                        // 步骤间隔等待（每 3ms 切片检查松手状态，保证随时松手零拖泥带水）
                         var waitRemaining = step.intervalAfterMs.coerceAtLeast(6L)
                         while (waitRemaining > 0 && isHolding.get() && isActive) {
-                            val slice = minOf(waitRemaining, 4L)
+                            val slice = minOf(waitRemaining, 3L)
                             delay(slice)
                             waitRemaining -= slice
                         }

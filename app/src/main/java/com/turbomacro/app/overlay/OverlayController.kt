@@ -83,7 +83,9 @@ class OverlayController(
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
                 WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT
-        )
+        ).apply {
+            applyCutoutShortEdges(this)
+        }
         windowManager.addView(ripple, rippleLp)
         rippleOverlay = ripple
 
@@ -100,6 +102,7 @@ class OverlayController(
             gravity = Gravity.TOP or Gravity.START
             x = currentProfile.triggerX
             y = currentProfile.triggerY
+            applyCutoutShortEdges(this)
         }
 
         val btn = FloatingTriggerButtonView(
@@ -340,7 +343,9 @@ class OverlayController(
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
-        )
+        ).apply {
+            applyCutoutShortEdges(this)
+        }
         windowManager.addView(editor, lp)
         targetEditorOverlay = editor
 
@@ -507,6 +512,13 @@ class OverlayController(
         } else {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
+        }
+    }
+
+    private fun applyCutoutShortEdges(lp: WindowManager.LayoutParams) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            lp.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
     }
 
