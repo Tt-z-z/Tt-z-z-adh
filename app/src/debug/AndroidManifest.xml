@@ -1,0 +1,13 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
+    <application android:label="TurboMacro 触控测试" tools:replace="android:label">
+        <activity android:name="com.turbomacro.app.ui.MainActivity" tools:node="remove" />
+        <service android:name="com.turbomacro.app.service.MacroAccessibilityService" tools:node="remove" />
+        <provider android:name="rikka.shizuku.ShizukuProvider" tools:node="remove" />
+        <activity android:name="com.turbomacro.app.ui.TouchDiagnosticActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

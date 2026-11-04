@@ -14,8 +14,8 @@ android {
         applicationId = "com.turbomacro.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 18
-        versionName = "1.6.2"
+        versionCode = 19
+        versionName = "1.6.3"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
@@ -27,6 +27,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".diagnostic"
+            versionNameSuffix = "-diagnostic"
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(
