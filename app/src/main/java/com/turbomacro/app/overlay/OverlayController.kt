@@ -145,7 +145,7 @@ class OverlayController private constructor(
         },
         onRequireMux = {
             mainHandler.post {
-                val detail = touchInjector.muxError() ?: "unknown"
+                val detail = "${touchInjector.mux.diagnosticStatus()} / ${touchInjector.muxError() ?: "无错误详情"}"
                 Toast.makeText(
                     context,
                     "需要先启用多指通道：松开屏幕全部手指，再关闭并重新打开悬浮键（$detail）",
@@ -198,9 +198,12 @@ class OverlayController private constructor(
                 macroEngine.isRunning()
             },
             onHoldStart = {
+                android.util.Log.i("TurboTrigger", "t=${SystemClock.uptimeMillis()} PRESS status=${touchInjector.mux.diagnosticStatus()}")
                 macroEngine.onTriggerPressDown(serviceProvider(), currentProfile)
+                android.util.Log.i("TurboTrigger", "t=${SystemClock.uptimeMillis()} RUNNING=${macroEngine.isRunning()}")
             },
             onHoldEnd = {
+                android.util.Log.i("TurboTrigger", "t=${SystemClock.uptimeMillis()} RELEASE")
                 macroEngine.onTriggerReleaseUp(currentProfile)
             },
             onDragMoved = { dx, dy ->
@@ -255,6 +258,24 @@ class OverlayController private constructor(
                 val ok = touchInjector.ensureMuxReady()
                 mainHandler.post result@{
                     if (!isShowing || overlayGeneration != generation) return@result
+                    val updateStatus = object : Runnable {
+                        override fun run() {
+                            if (!isShowing || overlayGeneration != generation) return
+                            val status = touchInjector.mux.diagnosticStatus()
+                            triggerButton?.diagnosticLabel = status
+                            if (status == "已到期") {
+                                macroEngine.forceStop()
+                                android.util.Log.i("TurboTrigger", "t=${SystemClock.uptimeMillis()} EXPIRED")
+                                Toast.makeText(context, "本轮限时验证已结束，不会自动重新接管", Toast.LENGTH_LONG).show()
+                                return
+                            }
+                            // 心跳先发现退出时也继续刷新到硬期限，避免按钮停在旧状态。
+                            if (ok && touchInjector.mux.diagnosticRemainingSeconds() > 0) {
+                                mainHandler.postDelayed(this, 200L)
+                            }
+                        }
+                    }
+                    updateStatus.run()
                     val message = if (ok) {
                         "✅ 多指通道已就绪：按住开火键连点，可同时拖枪/走位。编辑：音量+ 或连点钮3下"
                     } else {

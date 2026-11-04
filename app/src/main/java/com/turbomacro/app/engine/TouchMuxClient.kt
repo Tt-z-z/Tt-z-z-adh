@@ -48,7 +48,26 @@ class TouchMuxClient(private val appContext: Context) {
         Thread(r, "touchmux-hb").apply { isDaemon = true }
     }
 
-    fun isMerging(): Boolean = merging.get()
+    @Volatile private var diagnosticStartedAt = 0L
+
+    fun diagnosticRemainingSeconds(): Int {
+        if (diagnosticStartedAt == 0L) return 0
+        val remaining = 15_000L - (android.os.SystemClock.elapsedRealtime() - diagnosticStartedAt)
+        return ((remaining.coerceAtLeast(0L) + 999L) / 1000L).toInt()
+    }
+
+    fun diagnosticStatus(): String = when {
+        diagnosticStartedAt != 0L && diagnosticRemainingSeconds() == 0 -> "已到期"
+        merging.get() -> "就绪 ${diagnosticRemainingSeconds()}s"
+        lastError() != null -> "失败"
+        else -> "未就绪"
+    }
+
+    private fun trace(event: String) {
+        Log.i(TAG, "t=${android.os.SystemClock.uptimeMillis()} $event")
+    }
+
+    fun isMerging(): Boolean = merging.get() && diagnosticRemainingSeconds() > 0
 
     fun lastError(): String? = lastError.get() ?: processError.get()
 
@@ -78,6 +97,7 @@ class TouchMuxClient(private val appContext: Context) {
             }
             if (resp.startsWith("OK MERGING") || resp.startsWith("OK ALREADY")) {
                 merging.set(true)
+                trace("MERGING response=$resp remainingSeconds=${diagnosticRemainingSeconds()}")
                 startHeartbeatLocked()
                 lastError.set(null)
                 return true
@@ -104,6 +124,7 @@ class TouchMuxClient(private val appContext: Context) {
                 lock.withLock {
                     if (merging.get()) {
                         val response = sendAndWaitLocked("CANCEL_TAP", 350L)
+                        trace("CANCEL_ACK response=$response")
                         if (response != "OK CANCEL_TAP") destroyProcessLocked()
                     }
                 }
@@ -115,8 +136,14 @@ class TouchMuxClient(private val appContext: Context) {
 
     fun tap(x: Int, y: Int, holdMs: Int, allowed: () -> Boolean = { true }): Boolean {
         lock.withLock {
-            if (!merging.get() || pendingCancels.get() != 0 || !allowed()) return false
-            val resp = sendAndWaitLocked("TAP $x $y $holdMs", timeoutMs = 350L) ?: return false
+            if (!isMerging() || pendingCancels.get() != 0 || !allowed()) {
+                trace("TAP_REJECT status=${diagnosticStatus()} pendingCancels=${pendingCancels.get()}")
+                return false
+            }
+            trace("TAP_REQUEST x=$x y=$y holdMs=$holdMs")
+            val resp = sendAndWaitLocked("TAP $x $y $holdMs", timeoutMs = 350L)
+            trace("TAP_ACK response=$resp")
+            if (resp == null) return false
             if (resp.startsWith("OK")) return true
             lastError.set(resp)
             destroyProcessLocked()
@@ -202,6 +229,8 @@ class TouchMuxClient(private val appContext: Context) {
                 String::class.java
             )
             method.isAccessible = true
+            diagnosticStartedAt = android.os.SystemClock.elapsedRealtime()
+            trace("HELPER_START budgetMs=15000")
             val remote = method.invoke(null, arrayOf("/system/bin/timeout", "-k", "1s", "17s", bin.absolutePath, "--diagnostic-seconds", "15"), null, null)
                 ?: return false.also { lastError.set("newProcess_null") }
 

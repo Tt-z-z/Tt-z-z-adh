@@ -26,6 +26,13 @@ class FloatingTriggerButtonView(
     private val onQuickEditGesture: () -> Unit = {}
 ) : View(context) {
 
+    var diagnosticLabel: String = "准备中"
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
     var isLockedForCombat: Boolean = true
         set(value) {
             if (field != value) endCombatHold()
@@ -126,6 +133,11 @@ class FloatingTriggerButtonView(
             canvas.drawText("移动", cx, cy - (fm.ascent + fm.descent) / 2f, textPaint)
         }
         canvas.restore()
+        if (isLockedForCombat) {
+            textPaint.textSize = width / 7f
+            val fm = textPaint.fontMetrics
+            canvas.drawText(diagnosticLabel, cx, cy - (fm.ascent + fm.descent) / 2f, textPaint)
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
