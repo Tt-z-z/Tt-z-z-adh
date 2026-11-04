@@ -42,6 +42,10 @@ static void send_event(int type, int code, int value) {
 }
 
 static void reset_test_state(void) {
+    g_diagnostic_deadline_ms = 0;
+    g_no_tap = false;
+    g_test_now_ms = -1;
+    g_last_ping_ms = 0;
     g_test_event_count = 0;
     g_test_cleanup_count = 0;
     g_test_write_failure = false;
@@ -215,7 +219,121 @@ static void test_idle_and_io(void) {
     assert(!g_fatal);
 }
 
+static void test_options(void) {
+    reset_test_state();
+    char *defaults[] = {"touchmux"};
+    assert(parse_options(1, defaults, 1000));
+    assert(!g_no_tap && !g_diagnostic_deadline_ms);
+    char *low[] = {"touchmux", "--diagnostic-seconds", "1", "--no-tap"};
+    assert(parse_options(4, low, 1000));
+    assert(g_no_tap && g_diagnostic_deadline_ms == 2000);
+    char *high[] = {"touchmux", "--no-tap", "--diagnostic-seconds", "15"};
+    assert(parse_options(4, high, 1000));
+    assert(g_no_tap && g_diagnostic_deadline_ms == 16000);
+    const char *invalid[] = {"", "0", "16", "-1", "+1", " 1", "1 ",
+                             "1.5", "1s", "99999999999999999999999"};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+        char *args[] = {"touchmux", "--diagnostic-seconds", (char *)invalid[i]};
+        assert(!parse_options(3, args, 1000));
+        assert(g_no_tap && g_diagnostic_deadline_ms == 16000);
+        /* Invalid CLI returns before opening any device. */
+        assert(touchmux_program_main(3, args) == 2);
+    }
+    char *missing[] = {"touchmux", "--diagnostic-seconds"};
+    char *unknown[] = {"touchmux", "--unknown"};
+    char *duplicate[] = {"touchmux", "--no-tap", "--no-tap"};
+    char *duplicate_time[] = {"touchmux", "--diagnostic-seconds", "1",
+                              "--diagnostic-seconds", "2"};
+    assert(!parse_options(2, missing, 1000));
+    assert(!parse_options(2, unknown, 1000));
+    assert(!parse_options(3, duplicate, 1000));
+    assert(!parse_options(5, duplicate_time, 1000));
+    char *no_tap[] = {"touchmux", "--no-tap"};
+    assert(parse_options(2, no_tap, 1000));
+    assert(g_no_tap && !g_diagnostic_deadline_ms);
+    assert(parse_options(1, defaults, 1000));
+    assert(!g_no_tap && !g_diagnostic_deadline_ms);
+}
+
+static void test_no_tap(void) {
+    for (int merging = 0; merging < 2; ++merging) {
+        for (int active = 0; active < 2; ++active) {
+            reset_test_state();
+            g_no_tap = true;
+            g_merging = merging != 0;
+            g_tap.active = g_tap.down_sent = active != 0;
+            g_tap.x = 12;
+            g_tap.y = 34;
+            g_tap.up_deadline_ms = 5678;
+            struct pending_tap before;
+            memcpy(&before, &g_tap, sizeof(before));
+            char tap[] = "TAP 50 60 20";
+            handle_command(tap);
+            assert(memcmp(&before, &g_tap, sizeof(before)) == 0);
+            assert(g_test_event_count == 0 && g_test_cleanup_count == 0);
+        }
+    }
+}
+
+static void test_diagnostic_deadline(void) {
+    reset_test_state();
+    g_test_now_ms = 1000;
+    char *args[] = {"touchmux", "--diagnostic-seconds", "1"};
+    assert(parse_options(3, args, g_test_now_ms));
+    for (g_test_now_ms = 1100; g_test_now_ms < 2000; g_test_now_ms += 100) {
+        char ping[] = "PING";
+        handle_command(ping);
+        assert(g_last_ping_ms == g_test_now_ms);
+        assert(g_diagnostic_deadline_ms == 2000);
+        assert(!check_diagnostic_deadline());
+    }
+    char ping[] = "PING";
+    handle_command(ping); /* Exact boundary, even with a fresh heartbeat. */
+    assert(g_last_ping_ms == 1900);
+    assert_closed();
+    int cleanups = g_test_cleanup_count;
+    assert(check_diagnostic_deadline());
+    assert(g_test_cleanup_count == cleanups);
+
+    /* Simulate slow ENGAGE completion: no OK MERGING may escape. */
+    reset_test_state();
+    assert(parse_options(3, args, 1000));
+    g_test_now_ms = 2001;
+    int output[2];
+    assert(pipe(output) == 0);
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    assert(saved >= 0 && dup2(output[1], STDOUT_FILENO) >= 0);
+    close(output[1]);
+    assert(finish_engage() == -1);
+    fflush(stdout);
+    assert(dup2(saved, STDOUT_FILENO) >= 0);
+    close(saved);
+    char response[128] = {0};
+    assert(read(output[0], response, sizeof(response) - 1) > 0);
+    close(output[0]);
+    assert(strcmp(response, "ERR diagnostic_expired\n") == 0);
+    assert_closed();
+    assert(g_last_ping_ms == 0);
+    assert(do_engage(100, 100) == -1);
+
+    reset_test_state();
+    assert(parse_options(3, args, 1000));
+    g_test_now_ms = 2000;
+    /* Expired idle wait must stop before attempting a device read. */
+    assert(wait_until_idle(-1, IDLE_WAIT_MS) == -1);
+    assert_closed();
+
+    reset_test_state();
+    g_test_now_ms = 999999;
+    assert(!check_diagnostic_deadline()); /* Default mode has no deadline. */
+    assert(!g_fatal && g_test_cleanup_count == 0);
+}
+
 int main(void) {
+    test_options();
+    test_no_tap();
+    test_diagnostic_deadline();
     test_slot_stream();
     test_tracking_namespace();
     test_fail_closed();

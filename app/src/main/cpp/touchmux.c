@@ -111,12 +111,22 @@ static size_t g_test_event_capacity;
 static int g_test_cleanup_count;
 static bool g_test_write_failure;
 #endif
+/* Deadline starts at process entry, never at ENGAGE or PING. Cooperative only:
+ * blocking syscalls still require an external Android timeout wrapper. */
+static int64_t g_diagnostic_deadline_ms = 0;
+static bool g_no_tap = false;
+#ifdef TOUCHMUX_TEST
+static int64_t g_test_now_ms = -1;
+#endif
 static int64_t g_last_ping_ms = 0;
 static int64_t g_grabbed_at_ms = 0;
 static struct slot_state g_slots[MAX_SLOTS];
 static struct pending_tap g_tap;
 
 static int64_t now_ms(void) {
+#ifdef TOUCHMUX_TEST
+    if (g_test_now_ms >= 0) return g_test_now_ms;
+#endif
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
@@ -126,6 +136,41 @@ static void respond(const char *line) {
     fputs(line, stdout);
     fputc('\n', stdout);
     fflush(stdout);
+}
+
+/* Parse completely before changing configuration or touching a device. */
+static bool parse_options(int argc, char **argv, int64_t started_ms) {
+    int seconds = 0;
+    bool no_tap = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--no-tap") == 0 && !no_tap) {
+            no_tap = true;
+        } else if (strcmp(argv[i], "--diagnostic-seconds") == 0 && !seconds) {
+            if (++i >= argc || !argv[i][0]) return false;
+            /* Bounded digit parsing rejects signs, whitespace and overflow. */
+            for (const char *p = argv[i]; *p; ++p) {
+                if (*p < '0' || *p > '9') return false;
+                seconds = seconds * 10 + (*p - '0');
+                if (seconds > 15) return false;
+            }
+            if (seconds < 1) return false;
+        } else {
+            return false;
+        }
+    }
+    g_no_tap = no_tap;
+    g_diagnostic_deadline_ms = seconds ? started_ms + seconds * 1000 : 0;
+    return true;
+}
+
+static bool check_diagnostic_deadline(void) {
+    if (!g_diagnostic_deadline_ms || now_ms() < g_diagnostic_deadline_ms)
+        return false;
+    if (!g_fatal) {
+        fail_closed();
+        respond("ERR diagnostic_expired");
+    }
+    return true;
 }
 
 static int bit_test(const unsigned long *bits, int bit) {
@@ -510,6 +555,7 @@ static int wait_until_idle(int fd, int timeout_ms) {
     /* Query kernel state, not just deltas: a stationary finger emits nothing. */
     int64_t quiet_since = now_ms();
     while (now_ms() < deadline) {
+        if (check_diagnostic_deadline()) return -1;
         ssize_t n = read(fd, &ev, sizeof(ev));
         if (n == (ssize_t)sizeof(ev)) {
             if (ev.type == EV_SYN && ev.code == SYN_DROPPED) return -1;
@@ -559,7 +605,19 @@ static void ungrab_and_destroy(void) {
     }
 }
 
+static int finish_engage(void) {
+    /* Recheck after all potentially slow setup, before announcing success. */
+    if (check_diagnostic_deadline() || g_fatal) return -1;
+    g_grabbed_at_ms = now_ms();
+    g_last_ping_ms = g_grabbed_at_ms;
+    char buf[128];
+    snprintf(buf, sizeof(buf), "OK MERGING slots=%d macro=%d", g_real_slots, g_macro_slot);
+    respond(buf);
+    return 0;
+}
+
 static int do_engage(int display_w, int display_h) {
+    if (check_diagnostic_deadline() || g_fatal) return -1;
     if (g_merging) {
         respond("OK ALREADY");
         return 0;
@@ -609,12 +667,16 @@ static int do_engage(int display_w, int display_h) {
     g_io_error = false;
     if (g_fatal) return -1;
 
-    if (wait_until_idle(g_real_fd, IDLE_WAIT_MS) < 0) {
+    if (check_diagnostic_deadline()) return -1;
+    int idle_result = wait_until_idle(g_real_fd, IDLE_WAIT_MS);
+    if (check_diagnostic_deadline()) return -1;
+    if (idle_result < 0) {
         respond("ERR screen_busy");
         return -1;
     }
 
     g_ui_fd = create_virtual(g_real_fd, "-tm");
+    if (check_diagnostic_deadline()) return -1;
     if (g_ui_fd < 0) {
         respond("ERR uinput");
         return -1;
@@ -627,18 +689,16 @@ static int do_engage(int display_w, int display_h) {
     }
 
     g_merging = true;
+    if (check_diagnostic_deadline()) return -1;
     /* Recheck after grab: contacts may have arrived while uinput was created. */
-    if (wait_until_idle(g_real_fd, 250) < 0) {
+    idle_result = wait_until_idle(g_real_fd, 250);
+    if (check_diagnostic_deadline()) return -1;
+    if (idle_result < 0) {
         ungrab_and_destroy();
         respond("ERR screen_busy_after_grab");
         return -1;
     }
-    g_grabbed_at_ms = now_ms();
-    g_last_ping_ms = g_grabbed_at_ms;
-    char buf[128];
-    snprintf(buf, sizeof(buf), "OK MERGING slots=%d macro=%d", g_real_slots, g_macro_slot);
-    respond(buf);
-    return 0;
+    return finish_engage();
 }
 
 static void do_release(void) {
@@ -647,6 +707,10 @@ static void do_release(void) {
 }
 
 static void do_tap(int x, int y, int hold_ms) {
+    if (g_no_tap) {
+        respond("ERR tap_disabled");
+        return;
+    }
     if (!g_merging) {
         respond("ERR not_merging");
         return;
@@ -675,6 +739,7 @@ static void do_tap(int x, int y, int hold_ms) {
 }
 
 static void handle_command(char *line) {
+    if (check_diagnostic_deadline() || g_fatal) return;
     while (*line == ' ' || *line == '\t') line++;
     if (*line == '\0') return;
 
@@ -730,13 +795,17 @@ static bool valid_real_read(ssize_t n, int error) {
 }
 
 int main(int argc, char **argv) {
-    (void)argc;
-    (void)argv;
+    int64_t started_ms = now_ms();
+    if (!parse_options(argc, argv, started_ms)) {
+        respond("ERR args: [--diagnostic-seconds 1..15] [--no-tap]");
+        return 2;
+    }
     setvbuf(stdin, NULL, _IONBF, 0);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     char path[64];
     g_real_fd = open_touchscreen(path, sizeof(path));
+    if (check_diagnostic_deadline()) return 1;
     if (g_real_fd < 0) {
         respond("ERR no_touchscreen");
         return 1;
@@ -752,6 +821,7 @@ int main(int argc, char **argv) {
     g_last_ping_ms = now_ms();
 
     for (;;) {
+        if (check_diagnostic_deadline() || g_fatal) break;
         struct pollfd fds[2] = {0};
         fds[0].fd = STDIN_FILENO;
         fds[0].events = POLLIN;
@@ -764,7 +834,12 @@ int main(int argc, char **argv) {
             if (remain < timeout) timeout = remain > 0 ? (int)remain : 0;
         }
 
+        if (g_diagnostic_deadline_ms) {
+            int64_t remain = g_diagnostic_deadline_ms - now_ms();
+            if (remain < timeout) timeout = remain > 0 ? (int)remain : 0;
+        }
         int pr = poll(fds, g_merging ? 2 : 1, timeout);
+        if (check_diagnostic_deadline()) break;
         if (pr < 0 && errno == EINTR) continue;
         if (!check_poll_result(pr, errno, fds[0].revents,
                                g_merging ? fds[1].revents : 0)) break;
@@ -804,6 +879,7 @@ int main(int argc, char **argv) {
             }
         }
 
+        if (check_diagnostic_deadline() || g_fatal) break;
         if (g_merging && (fds[1].revents & POLLIN)) {
             struct input_event evs[MAX_EVENTS];
             ssize_t n = read(g_real_fd, evs, sizeof(evs));
@@ -811,6 +887,7 @@ int main(int argc, char **argv) {
             if (n > 0) {
                 size_t count = (size_t)n / sizeof(struct input_event);
                 for (size_t i = 0; i < count && !g_fatal && !g_io_error; i++) {
+                    if (check_diagnostic_deadline()) break;
                     handle_real_event(&evs[i]);
                 }
             }
@@ -822,6 +899,7 @@ int main(int argc, char **argv) {
             break;
         }
 
+        if (check_diagnostic_deadline()) break;
         /* Advance macro UP even if screen is idle (no SYN from real). */
         if (g_merging && g_tap.active && !g_in_packet) {
             flush_pending_macro_at_syn();
