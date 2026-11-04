@@ -18,6 +18,7 @@ import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
 import com.turbomacro.app.overlay.OverlayController
 import com.turbomacro.app.service.MacroAccessibilityService
 import com.turbomacro.app.storage.ProfileRepository
@@ -42,6 +43,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, true)
+        window.statusBarColor = Color.parseColor("#101318")
+        window.navigationBarColor = Color.parseColor("#101318")
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightStatusBars = false
+        WindowCompat.getInsetsController(window, window.decorView).isAppearanceLightNavigationBars = false
         repository = ProfileRepository(this)
         Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
         buildContentView()
@@ -78,14 +84,14 @@ class MainActivity : AppCompatActivity() {
 
         // 顶部标题区
         val title = TextView(this).apply {
-            text = "TURBO MACRO · 极速肩键宏"
-            setTextColor(Color.parseColor("#00E5FF"))
-            textSize = 22f
+            text = "TurboMacro"
+            setTextColor(Color.parseColor("#F5F5F5"))
+            textSize = 24f
             paint.isFakeBoldText = true
         }
         val subtitle = TextView(this).apply {
-            text = "按住即发 · 松手立停 · 小米原生水波纹与线性马达反馈"
-            setTextColor(Color.parseColor("#8A99AD"))
+            text = "游戏工具箱  ·  轻量、克制、不打扰"
+            setTextColor(Color.parseColor("#9AA0A6"))
             textSize = 13f
             setPadding(0, dp(4), 0, dp(18))
         }
@@ -95,8 +101,8 @@ class MainActivity : AppCompatActivity() {
         // 卡片 1：工作通道与系统安全体检
         val channelCard = createStyledCard()
         val channelHeader = TextView(this).apply {
-            text = "⚡ 底层触控引擎（零系统损伤保护）"
-            setTextColor(Color.WHITE)
+            text = "触控服务"
+            setTextColor(Color.parseColor("#F5F5F5"))
             textSize = 16f
             paint.isFakeBoldText = true
         }
@@ -134,10 +140,18 @@ class MainActivity : AppCompatActivity() {
 
         // 卡片 2：一键启动悬浮触发器
         val launchCard = createStyledCard()
-        toggleOverlayButton = Button(this).apply {
-            text = "🚀 启动极速悬浮触发键"
+        val launchTitle = TextView(this).apply {
+            text = "悬浮触发键"
+            setTextColor(Color.parseColor("#F5F5F5"))
             textSize = 16f
-            setTextColor(Color.parseColor("#0B0F17"))
+            paint.isFakeBoldText = true
+            setPadding(0, 0, 0, dp(10))
+        }
+        launchCard.addView(launchTitle)
+        toggleOverlayButton = Button(this).apply {
+            text = "启动悬浮触发键"
+            textSize = 16f
+            setTextColor(Color.parseColor("#111111"))
             paint.isFakeBoldText = true
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#00E5FF"))
@@ -179,7 +193,7 @@ class MainActivity : AppCompatActivity() {
         // 卡片 3：手感与视觉反馈定制
         val feelCard = createStyledCard()
         val feelTitle = TextView(this).apply {
-            text = "🎮 手感、反馈与防遮挡设置"
+            text = "触控与反馈"
             setTextColor(Color.WHITE)
             textSize = 16f
             paint.isFakeBoldText = true
@@ -309,15 +323,15 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (ctrl.isOverlayShowing()) {
-            toggleOverlayButton.text = "⏹ 关闭悬浮触发键"
+            toggleOverlayButton.text = "关闭悬浮触发键"
             toggleOverlayButton.background = GradientDrawable().apply {
-                setColor(Color.parseColor("#FF5252"))
+                setColor(Color.parseColor("#D9534F"))
                 cornerRadius = dp(12).toFloat()
             }
         } else {
-            toggleOverlayButton.text = "🚀 启动极速悬浮触发键"
+            toggleOverlayButton.text = "启动悬浮触发键"
             toggleOverlayButton.background = GradientDrawable().apply {
-                setColor(Color.parseColor("#00E5FF"))
+                setColor(Color.parseColor("#FF6900"))
                 cornerRadius = dp(12).toFloat()
             }
         }
@@ -349,9 +363,9 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(16), dp(16), dp(16), dp(16))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#151C28"))
-                cornerRadius = dp(16).toFloat()
-                setStroke(dp(1), Color.parseColor("#263248"))
+                setColor(Color.parseColor("#1A1D21"))
+                cornerRadius = dp(14).toFloat()
+                setStroke(dp(1), Color.parseColor("#2A2E33"))
             }
         }
     }
@@ -360,11 +374,11 @@ class MainActivity : AppCompatActivity() {
         return Button(this).apply {
             text = title
             textSize = 12.5f
-            setTextColor(Color.parseColor("#00E5FF"))
+            setTextColor(Color.parseColor("#E6E6E6"))
             background = GradientDrawable().apply {
-                setColor(Color.parseColor("#1D2738"))
+                setColor(Color.parseColor("#24282D"))
                 cornerRadius = dp(10).toFloat()
-                setStroke(dp(1), Color.parseColor("#00E5FF"))
+                setStroke(dp(1), Color.parseColor("#3B4148"))
             }
             setOnClickListener { onClick() }
         }
