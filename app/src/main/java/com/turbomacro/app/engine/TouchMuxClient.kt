@@ -148,12 +148,10 @@ class TouchMuxClient(private val appContext: Context) {
                 trace("TAP_REJECT status=${diagnosticStatus()} pendingCancels=${pendingCancels.get()}")
                 return false
             }
+            // The overlay is commonly engaged in portrait and used after the game
+            // rotates to landscape. Do not tear down the mux on rotation; the
+            // helper uses natural panel axes and we transform this tap below.
             val geometry = displayGeometry()
-            if (geometry != engagedGeometry) {
-                lastError.set("display_changed_restart_required")
-                destroyProcessLocked()
-                return false
-            }
             val (w, h, rotation) = geometry
             if (x !in 0 until w || y !in 0 until h) {
                 lastError.set("target_out_of_bounds")

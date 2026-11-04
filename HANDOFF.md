@@ -48,7 +48,7 @@
 
 `TouchMuxClient.kt`：
 - 从 `applicationInfo.nativeLibraryDir` 执行 helper；不能复制到 app 私有 filesDir 后让 Shizuku shell 执行（shell 无法穿越私有目录，曾报 start:null）。
-- 当前 1.6.9 验证版启动参数包括外层 timeout 和内部 600 秒期限；不应自动无限重启接管。
+- 当前 1.7.0 验证版启动参数包括外层 timeout 和内部 600 秒期限；不应自动无限重启接管。
 - `cancelTapAsync()` 后台串行取消，pendingCancels 阻止新 TAP 越过尚未完成的取消；tap 获取锁后再次检查 allowed 回调。
 - 销毁远端进程后再关闭阻塞读流，避免 release/QUIT 同步写造成死锁。
 
