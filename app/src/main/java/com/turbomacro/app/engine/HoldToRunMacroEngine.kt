@@ -138,6 +138,7 @@ class HoldToRunMacroEngine(
         val wasHolding = isHolding.getAndSet(false)
         activeJob?.cancel()
         activeJob = null
+        touchInjector.mux.cancelTapAsync()
         if (wasHolding && profile.enableHaptics) {
             hapticEngine.performTriggerUp()
         }
@@ -149,6 +150,7 @@ class HoldToRunMacroEngine(
         isHolding.set(false)
         activeJob?.cancel()
         activeJob = null
+        touchInjector.mux.cancelTapAsync()
         onRunStateChanged(false)
     }
 }

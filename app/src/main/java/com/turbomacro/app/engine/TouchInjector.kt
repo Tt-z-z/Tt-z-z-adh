@@ -72,7 +72,11 @@ class TouchInjector(context: Context) {
         val iy = y.toInt().coerceAtLeast(0)
 
         if (mux.isMerging()) {
-            val ok = mux.tap(ix, iy, pressMs)
+            while (mux.isCancelPending()) {
+                if (!isStillHoldingTrigger()) return false
+                delay(2L)
+            }
+            val ok = mux.tap(ix, iy, pressMs, isStillHoldingTrigger)
             // 留给 helper 完成 DOWN→UP；间隔由引擎控制，这里只做极短让步避免打满 CPU
             if (ok) delay(pressMs.toLong().coerceAtMost(12L))
             return ok

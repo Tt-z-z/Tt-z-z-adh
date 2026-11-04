@@ -90,9 +90,32 @@ class TouchMuxClient(private val appContext: Context) {
         }
     }
 
-    fun tap(x: Int, y: Int, holdMs: Int): Boolean {
+    private val cancelExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "touchmux-cancel").apply { isDaemon = true }
+    }
+    private val pendingCancels = java.util.concurrent.atomic.AtomicInteger(0)
+
+    fun isCancelPending(): Boolean = pendingCancels.get() != 0
+
+    fun cancelTapAsync() {
+        pendingCancels.incrementAndGet()
+        cancelExecutor.execute {
+            try {
+                lock.withLock {
+                    if (merging.get()) {
+                        val response = sendAndWaitLocked("CANCEL_TAP", 350L)
+                        if (response != "OK CANCEL_TAP") destroyProcessLocked()
+                    }
+                }
+            } finally {
+                pendingCancels.decrementAndGet()
+            }
+        }
+    }
+
+    fun tap(x: Int, y: Int, holdMs: Int, allowed: () -> Boolean = { true }): Boolean {
         lock.withLock {
-            if (!merging.get()) return false
+            if (!merging.get() || pendingCancels.get() != 0 || !allowed()) return false
             val resp = sendAndWaitLocked("TAP $x $y $holdMs", timeoutMs = 350L) ?: return false
             if (resp.startsWith("OK")) return true
             lastError.set(resp)
@@ -179,7 +202,7 @@ class TouchMuxClient(private val appContext: Context) {
                 String::class.java
             )
             method.isAccessible = true
-            val remote = method.invoke(null, arrayOf(bin.absolutePath), null, null)
+            val remote = method.invoke(null, arrayOf("/system/bin/timeout", "-k", "1s", "17s", bin.absolutePath, "--diagnostic-seconds", "15"), null, null)
                 ?: return false.also { lastError.set("newProcess_null") }
 
             remoteProcess = remote

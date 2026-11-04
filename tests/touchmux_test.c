@@ -356,7 +356,39 @@ static void test_optional_axes(void) {
     assert(!g_has_pressure && !g_has_touch_major);
 }
 
+static void test_cancel_tap(void) {
+    reset_test_state();
+    send_event(EV_ABS, ABS_MT_SLOT, 1);
+    send_event(EV_ABS, ABS_MT_TRACKING_ID, 12);
+    send_event(EV_SYN, SYN_REPORT, 0);
+    int real_id = device.attributes[1][ABS_MT_TRACKING_ID];
+    g_tap.active = true;
+    emit_macro_down();
+    char cancel[] = "CANCEL_TAP";
+    handle_command(cancel);
+    consume();
+    assert(!g_tap.active && !g_tap.down_sent);
+    assert(device.attributes[1][ABS_MT_TRACKING_ID] == real_id);
+    assert(device.attributes[g_macro_slot][ABS_MT_TRACKING_ID] == -1);
+    assert(g_test_cleanup_count == 0);
+    size_t count = g_test_event_count;
+    handle_command(cancel);
+    assert(g_test_event_count == count);
+
+    g_tap.active = true;
+    emit_macro_down();
+    send_event(EV_ABS, ABS_MT_POSITION_X, 100);
+    count = g_test_event_count;
+    handle_command(cancel);
+    assert(g_test_event_count == count); /* No SYN inside a real frame. */
+    send_event(EV_SYN, SYN_REPORT, 0);
+    assert(!g_tap.active && !g_tap.down_sent);
+    assert(device.attributes[1][ABS_MT_TRACKING_ID] == real_id);
+    assert(g_test_cleanup_count == 0);
+}
+
 int main(void) {
+    test_cancel_tap();
     test_optional_axes();
     test_options();
     test_no_tap();

@@ -746,6 +746,20 @@ static void handle_command(char *line) {
         respond("OK PONG");
         return;
     }
+    if (strcmp(line, "CANCEL_TAP") == 0) {
+        /* Preserve partial real frames: lift at the next SYN boundary. */
+        if (g_tap.down_sent) {
+            g_tap.up_deadline_ms = 0;
+            if (!g_in_packet) {
+                emit_macro_up();
+                select_output_slot(g_real_current_slot);
+            }
+        } else {
+            g_tap.active = false;
+        }
+        respond("OK CANCEL_TAP");
+        return;
+    }
     if (strncmp(line, "QUIT", 4) == 0) {
         do_release();
         respond("OK BYE");

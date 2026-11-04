@@ -28,6 +28,7 @@ class FloatingTriggerButtonView(
 
     var isLockedForCombat: Boolean = true
         set(value) {
+            if (field != value) endCombatHold()
             field = value
             invalidate()
         }
@@ -37,6 +38,21 @@ class FloatingTriggerButtonView(
             field = value.coerceIn(0.15f, 1.0f)
             if (!isPressing && !isMacroRunningProvider()) alpha = field
         }
+
+    private var holdPointerId = MotionEvent.INVALID_POINTER_ID
+
+    private fun endCombatHold() {
+        val hadOwner = holdPointerId != MotionEvent.INVALID_POINTER_ID
+        holdPointerId = MotionEvent.INVALID_POINTER_ID
+        isPressing = false
+        if (hadOwner) onHoldEnd()
+        refreshVisualState()
+    }
+
+    override fun onDetachedFromWindow() {
+        endCombatHold()
+        super.onDetachedFromWindow()
+    }
 
     private var isPressing = false
     private var downRawX = 0f
@@ -122,32 +138,34 @@ class FloatingTriggerButtonView(
                     lastTapDownUptimeMs = now
                     if (tapStreakCount >= 3) {
                         tapStreakCount = 0
-                        if (isPressing) {
-                            isPressing = false
-                            onHoldEnd()
-                        }
+                        endCombatHold()
                         onQuickEditGesture()
                         refreshVisualState()
                         return true
                     }
-                    // 一律按住开火；无 Shizuku 时引擎内部拒绝，不会走无障碍清指
+                    // 只认最初按下的手指；其他手指不能接替触发权。
+                    endCombatHold()
+                    holdPointerId = event.getPointerId(event.actionIndex)
                     isPressing = true
                     refreshVisualState()
                     onHoldStart()
                     return true
                 }
-                MotionEvent.ACTION_POINTER_DOWN,
-                MotionEvent.ACTION_POINTER_UP,
+                MotionEvent.ACTION_POINTER_DOWN -> return true
+                MotionEvent.ACTION_POINTER_UP -> {
+                    if (event.getPointerId(event.actionIndex) == holdPointerId) endCombatHold()
+                    return true
+                }
                 MotionEvent.ACTION_MOVE -> {
-                    // 悬浮钮窗口内的多余 pointer 全部吞掉，绝不向外冒泡干扰
+                    val index = event.findPointerIndex(holdPointerId)
+                    if (index < 0 || event.getX(index) < 0f || event.getX(index) >= width ||
+                        event.getY(index) < 0f || event.getY(index) >= height) {
+                        endCombatHold()
+                    }
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                    if (isPressing) {
-                        isPressing = false
-                        onHoldEnd()
-                        refreshVisualState()
-                    }
+                    endCombatHold()
                     return true
                 }
             }
