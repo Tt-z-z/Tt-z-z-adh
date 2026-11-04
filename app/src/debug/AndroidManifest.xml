@@ -1,13 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools">
     <application android:label="TurboMacro 触控测试" tools:replace="android:label">
-        <!-- 保留显式打开的配置页与 Shizuku 接入，默认入口仍为无注入诊断页。 -->
-        <activity android:name="com.turbomacro.app.ui.MainActivity" android:exported="true" tools:node="replace" />
-        <service android:name="com.turbomacro.app.service.MacroAccessibilityService" tools:node="remove" />
-        <activity android:name="com.turbomacro.app.ui.TouchDiagnosticActivity" android:exported="true">
+        <!-- 诊断包也默认进入正常配置/使用界面；诊断页仅通过显式 Intent 打开。 -->
+        <activity android:name="com.turbomacro.app.ui.MainActivity" android:exported="true" tools:node="replace">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service android:name="com.turbomacro.app.service.MacroAccessibilityService" tools:node="remove" />
+        <activity android:name="com.turbomacro.app.ui.TouchDiagnosticActivity" android:exported="true" />
     </application>
 </manifest>
