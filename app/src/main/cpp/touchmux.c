@@ -63,6 +63,7 @@
 
 struct slot_state {
     int tracking_id;
+    int output_tracking_id;
     int x;
     int y;
     bool active;
@@ -82,11 +83,34 @@ static int g_real_slots = 10;
 static int g_macro_slot = 10;
 static int g_abs_x_min, g_abs_x_max, g_abs_y_min, g_abs_y_max;
 static int g_display_w = 1080, g_display_h = 2400;
-static int g_next_tracking = 1000;
-static int g_current_slot = 0;
+/* Input IDs are independent: map real lifetimes to 0..65534, macro to 65535. */
+static int g_real_tracking_max = 65535;
+static int g_next_output_tracking = 0;
+static int g_real_current_slot = 0;
+static int g_output_slot = 0;
 static bool g_btn_touch = false;
 static bool g_merging = false;
 static bool g_in_packet = false;
+static bool g_io_error = false;
+static bool g_fatal = false;
+
+static void ungrab_and_destroy(void);
+static void fail_closed(void) {
+    g_fatal = true;
+    ungrab_and_destroy();
+#ifndef TOUCHMUX_TEST
+    /* Closing also releases the grab if EVIOCGRAB(0) itself failed. */
+    if (g_real_fd >= 0) { close(g_real_fd); g_real_fd = -1; }
+#endif
+}
+
+#ifdef TOUCHMUX_TEST
+static struct input_event *g_test_events;
+static size_t g_test_event_count;
+static size_t g_test_event_capacity;
+static int g_test_cleanup_count;
+static bool g_test_write_failure;
+#endif
 static int64_t g_last_ping_ms = 0;
 static int64_t g_grabbed_at_ms = 0;
 static struct slot_state g_slots[MAX_SLOTS];
@@ -139,56 +163,79 @@ static int read_absinfo(int fd, int code, int *min_v, int *max_v) {
     return 0;
 }
 
+/* Configuration must finish successfully before the real device is grabbed. */
+#define CHECK_UI(fd, request, arg) do { \
+    if (ioctl(fd, request, arg) < 0) { close(fd); return -1; } \
+} while (0)
+
 static int create_virtual(int real_fd, const char *name_suffix) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) fd = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) return -1;
 
-    ioctl(fd, UI_SET_EVBIT, EV_SYN);
-    ioctl(fd, UI_SET_EVBIT, EV_KEY);
-    ioctl(fd, UI_SET_EVBIT, EV_ABS);
-    ioctl(fd, UI_SET_KEYBIT, BTN_TOUCH);
-    ioctl(fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
+    CHECK_UI(fd, UI_SET_EVBIT, EV_SYN);
+    CHECK_UI(fd, UI_SET_EVBIT, EV_KEY);
+    CHECK_UI(fd, UI_SET_EVBIT, EV_ABS);
+    CHECK_UI(fd, UI_SET_KEYBIT, BTN_TOUCH);
+    CHECK_UI(fd, UI_SET_KEYBIT, BTN_TOOL_FINGER);
 #ifdef UI_SET_PROPBIT
-    ioctl(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
+    CHECK_UI(fd, UI_SET_PROPBIT, INPUT_PROP_DIRECT);
 #endif
 
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_SLOT);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
-    ioctl(fd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
+    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_SLOT);
+    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
+    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
+    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
+    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
+    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
 
     struct uinput_abs_setup abs;
     memset(&abs, 0, sizeof(abs));
 
     abs.code = ABS_MT_SLOT;
     abs.absinfo.maximum = g_macro_slot;
-    ioctl(fd, UI_ABS_SETUP, &abs);
+    CHECK_UI(fd, UI_ABS_SETUP, &abs);
 
     abs.code = ABS_MT_TRACKING_ID;
     abs.absinfo.minimum = 0;
     abs.absinfo.maximum = 65535;
-    ioctl(fd, UI_ABS_SETUP, &abs);
+    CHECK_UI(fd, UI_ABS_SETUP, &abs);
 
     abs.code = ABS_MT_POSITION_X;
     abs.absinfo.minimum = g_abs_x_min;
     abs.absinfo.maximum = g_abs_x_max;
-    ioctl(fd, UI_ABS_SETUP, &abs);
+    CHECK_UI(fd, UI_ABS_SETUP, &abs);
 
     abs.code = ABS_MT_POSITION_Y;
     abs.absinfo.minimum = g_abs_y_min;
     abs.absinfo.maximum = g_abs_y_max;
-    ioctl(fd, UI_ABS_SETUP, &abs);
+    CHECK_UI(fd, UI_ABS_SETUP, &abs);
 
     abs.code = ABS_MT_TOUCH_MAJOR;
     abs.absinfo.maximum = 255;
-    ioctl(fd, UI_ABS_SETUP, &abs);
+    CHECK_UI(fd, UI_ABS_SETUP, &abs);
 
     abs.code = ABS_MT_PRESSURE;
     abs.absinfo.maximum = 255;
-    ioctl(fd, UI_ABS_SETUP, &abs);
+    CHECK_UI(fd, UI_ABS_SETUP, &abs);
+
+    /* Preserve every advertised per-contact axis (orientation, distance, etc.). */
+    unsigned long bits[(ABS_MAX / (sizeof(unsigned long) * 8)) + 1] = {0};
+    if (ioctl(real_fd, EVIOCGBIT(EV_ABS, sizeof(bits)), bits) < 0) {
+        close(fd);
+        return -1;
+    }
+    for (int code = ABS_MT_TOUCH_MAJOR; code <= ABS_MT_TOOL_Y; ++code) {
+        if (code == ABS_MT_TRACKING_ID || !bit_test(bits, code)) continue;
+        memset(&abs, 0, sizeof(abs));
+        abs.code = (uint16_t)code;
+        if (ioctl(real_fd, EVIOCGABS(code), &abs.absinfo) < 0) {
+            close(fd);
+            return -1;
+        }
+        CHECK_UI(fd, UI_SET_ABSBIT, code);
+        CHECK_UI(fd, UI_ABS_SETUP, &abs);
+    }
 
     char name[80];
     char real_name[64];
@@ -220,14 +267,44 @@ static int create_virtual(int real_fd, const char *name_suffix) {
 }
 
 static int emit(int type, int code, int value) {
+    if (g_fatal || g_io_error) return -1;
     struct input_event ev;
     memset(&ev, 0, sizeof(ev));
     gettimeofday(&ev.time, NULL);
     ev.type = (uint16_t)type;
     ev.code = (uint16_t)code;
     ev.value = value;
-    ssize_t n = write(g_ui_fd, &ev, sizeof(ev));
-    return n == (ssize_t)sizeof(ev) ? 0 : -1;
+    ssize_t n;
+#ifdef TOUCHMUX_TEST
+    if (g_test_write_failure) { g_io_error = true; return -1; }
+    if (g_test_event_count == g_test_event_capacity) {
+        size_t next = g_test_event_capacity ? g_test_event_capacity * 2 : 64;
+        struct input_event *events = (struct input_event *)realloc(
+            g_test_events, next * sizeof(*events));
+        if (!events) {
+            g_io_error = true;
+            return -1;
+        }
+        g_test_events = events;
+        g_test_event_capacity = next;
+    }
+    g_test_events[g_test_event_count++] = ev;
+    n = (ssize_t)sizeof(ev);
+#else
+    do {
+        n = write(g_ui_fd, &ev, sizeof(ev));
+    } while (n < 0 && errno == EINTR);
+#endif
+    if (n != (ssize_t)sizeof(ev)) {
+        g_io_error = true;
+        return -1;
+    }
+    if (type == EV_ABS && code == ABS_MT_SLOT) g_output_slot = value;
+    return 0;
+}
+
+static int select_output_slot(int slot) {
+    return g_output_slot == slot ? 0 : emit(EV_ABS, ABS_MT_SLOT, slot);
 }
 
 static int any_real_active(void) {
@@ -270,14 +347,13 @@ static int px_to_abs_y(int y) {
 static void emit_macro_down(void) {
     int ax = px_to_abs_x(g_tap.x);
     int ay = px_to_abs_y(g_tap.y);
-    int tid = g_next_tracking++;
+    int tid = 65535;
     emit(EV_ABS, ABS_MT_SLOT, g_macro_slot);
     emit(EV_ABS, ABS_MT_TRACKING_ID, tid);
     emit(EV_ABS, ABS_MT_POSITION_X, ax);
     emit(EV_ABS, ABS_MT_POSITION_Y, ay);
     emit(EV_ABS, ABS_MT_TOUCH_MAJOR, 9);
     emit(EV_ABS, ABS_MT_PRESSURE, 40);
-    g_current_slot = g_macro_slot;
     g_tap.down_sent = true;
     sync_btn_touch();
     emit(EV_SYN, SYN_REPORT, 0);
@@ -290,7 +366,6 @@ static void emit_macro_up(void) {
     }
     emit(EV_ABS, ABS_MT_SLOT, g_macro_slot);
     emit(EV_ABS, ABS_MT_TRACKING_ID, -1);
-    g_current_slot = g_macro_slot;
     g_tap.down_sent = false;
     g_tap.active = false;
     sync_btn_touch();
@@ -310,7 +385,38 @@ static void flush_pending_macro_at_syn(void) {
     }
 }
 
+static int allocate_real_output_id(void) {
+    /* Skip all active IDs, including the old lifetime on a replacement slot. */
+    for (int tries = 0; tries < 65535; ++tries) {
+        int candidate = g_next_output_tracking;
+        g_next_output_tracking = (candidate + 1) % 65535;
+        bool used = false;
+        for (int i = 0; i < g_real_slots; ++i) {
+            if (g_slots[i].active && g_slots[i].output_tracking_id == candidate) {
+                used = true;
+                break;
+            }
+        }
+        if (!used) return candidate;
+    }
+    return -1;
+}
+
 static void handle_real_event(const struct input_event *ev) {
+    if (g_fatal || g_io_error) return;
+    if (ev->type == EV_SYN && ev->code == SYN_DROPPED) {
+        /* State cannot be reconstructed from subsequent delta events. */
+        fail_closed();
+        return;
+    }
+    if (ev->type == EV_ABS && ev->code > ABS_MT_SLOT &&
+        ev->code <= ABS_MT_TOOL_Y) {
+        if (g_real_current_slot < 0 || g_real_current_slot >= g_real_slots) {
+            fail_closed();
+            return;
+        }
+        if (select_output_slot(g_real_current_slot) < 0) return;
+    }
     /* Drop BTN_TOUCH from real — we derive it after merge. */
     if (ev->type == EV_KEY && ev->code == BTN_TOUCH) {
         g_in_packet = true;
@@ -318,37 +424,49 @@ static void handle_real_event(const struct input_event *ev) {
     }
 
     if (ev->type == EV_ABS && ev->code == ABS_MT_SLOT) {
-        g_current_slot = ev->value;
-        if (g_current_slot < 0) g_current_slot = 0;
-        if (g_current_slot >= g_real_slots) {
-            /* Ignore bogus slot indices beyond real capacity. */
-            g_in_packet = true;
+        g_real_current_slot = ev->value;
+        if (g_real_current_slot < 0 || g_real_current_slot >= g_real_slots) {
+            fail_closed();
             return;
         }
-        emit(EV_ABS, ABS_MT_SLOT, g_current_slot);
+        select_output_slot(g_real_current_slot);
         g_in_packet = true;
         return;
     }
 
     if (ev->type == EV_ABS && ev->code == ABS_MT_TRACKING_ID) {
-        int s = g_current_slot;
-        if (s >= 0 && s < MAX_SLOTS && s < g_real_slots) {
-            if (ev->value < 0) {
-                g_slots[s].active = false;
-                g_slots[s].tracking_id = -1;
-            } else {
-                g_slots[s].active = true;
-                g_slots[s].tracking_id = ev->value;
+        if (ev->value < -1 || ev->value > g_real_tracking_max) {
+            fail_closed();
+            return;
+        }
+        int s = g_real_current_slot;
+        for (int i = 0; i < g_real_slots; ++i) {
+            if (i != s && ev->value >= 0 && g_slots[i].active &&
+                g_slots[i].tracking_id == ev->value) {
+                fail_closed();
+                return;
             }
         }
-        emit(ev->type, ev->code, ev->value);
+        int output_id = -1;
+        if (ev->value >= 0) {
+            if (g_slots[s].active && g_slots[s].tracking_id == ev->value) {
+                output_id = g_slots[s].output_tracking_id;
+            } else {
+                output_id = allocate_real_output_id();
+                if (output_id < 0) { fail_closed(); return; }
+            }
+        }
+        if (emit(ev->type, ev->code, output_id) < 0) return;
+        g_slots[s].active = ev->value >= 0;
+        g_slots[s].tracking_id = ev->value;
+        g_slots[s].output_tracking_id = output_id;
         g_in_packet = true;
         return;
     }
 
     if (ev->type == EV_ABS &&
         (ev->code == ABS_MT_POSITION_X || ev->code == ABS_MT_POSITION_Y)) {
-        int s = g_current_slot;
+        int s = g_real_current_slot;
         if (s >= 0 && s < MAX_SLOTS && s < g_real_slots) {
             if (ev->code == ABS_MT_POSITION_X) g_slots[s].x = ev->value;
             else g_slots[s].y = ev->value;
@@ -367,47 +485,65 @@ static void handle_real_event(const struct input_event *ev) {
         return;
     }
 
-    if (ev->type == EV_SYN && ev->code == SYN_DROPPED) {
-        /* Ask kernel to resend — still forward marker. */
-        emit(EV_SYN, SYN_DROPPED, 0);
-        g_in_packet = false;
-        return;
-    }
-
     /* Pass through remaining events. */
     emit(ev->type, ev->code, ev->value);
     g_in_packet = true;
 }
 
+#ifdef TOUCHMUX_TEST
+static int (*g_test_query_slots)(int32_t *ids, int count);
+#endif
+
+static int query_tracking_slots(int fd, int32_t *ids) {
+    ids[0] = ABS_MT_TRACKING_ID;
+#ifdef TOUCHMUX_TEST
+    (void)fd;
+    return g_test_query_slots ? g_test_query_slots(ids, g_real_slots) : -1;
+#else
+    return ioctl(fd, EVIOCGMTSLOTS((g_real_slots + 1) * sizeof(int32_t)), ids);
+#endif
+}
+
 static int wait_until_idle(int fd, int timeout_ms) {
     int64_t deadline = now_ms() + timeout_ms;
     struct input_event ev;
-    int contacts = 0;
-    /* Drain and count; also require a quiet stretch. */
+    /* Query kernel state, not just deltas: a stationary finger emits nothing. */
     int64_t quiet_since = now_ms();
     while (now_ms() < deadline) {
         ssize_t n = read(fd, &ev, sizeof(ev));
         if (n == (ssize_t)sizeof(ev)) {
-            if (ev.type == EV_ABS && ev.code == ABS_MT_TRACKING_ID) {
-                if (ev.value >= 0) contacts++;
-                else if (contacts > 0) contacts--;
-            }
-            if (ev.type == EV_KEY && ev.code == BTN_TOUCH) {
-                contacts = ev.value ? 1 : 0;
-            }
+            if (ev.type == EV_SYN && ev.code == SYN_DROPPED) return -1;
             quiet_since = now_ms();
             continue;
         }
-        if (contacts <= 0 && now_ms() - quiet_since >= 180) {
+        if (n < 0 && errno == EINTR) continue;
+        if (n >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK)) return -1;
+        int32_t ids[MAX_SLOTS + 1];
+        if (query_tracking_slots(fd, ids) < 0) return -1;
+        bool active = false;
+        for (int i = 1; i <= g_real_slots; ++i) active |= ids[i] >= 0;
+        if (active) quiet_since = now_ms();
+        if (!active && now_ms() - quiet_since >= 180) {
+            struct input_absinfo slot;
+            if (ioctl(fd, EVIOCGABS(ABS_MT_SLOT), &slot) < 0 ||
+                slot.value < 0 || slot.value >= g_real_slots) return -1;
+            g_real_current_slot = slot.value;
             return 0;
         }
         usleep(10 * 1000);
     }
-    return contacts <= 0 ? 0 : -1;
+    return -1;
 }
 
 static void ungrab_and_destroy(void) {
-    if (g_tap.active && g_tap.down_sent) {
+#ifdef TOUCHMUX_TEST
+    ++g_test_cleanup_count;
+    g_tap.active = false;
+    g_tap.down_sent = false;
+    g_merging = false;
+    return;
+#endif
+    if (!g_fatal && !g_io_error && g_tap.active && g_tap.down_sent) {
         emit_macro_up();
     }
     g_tap.active = false;
@@ -440,13 +576,18 @@ static int do_engage(int display_w, int display_h) {
         }
     }
 
-    int slot_min = 0, slot_max = 9;
-    if (read_absinfo(g_real_fd, ABS_MT_SLOT, &slot_min, &slot_max) == 0) {
-        g_real_slots = slot_max + 1;
-        if (g_real_slots < 1) g_real_slots = 1;
-        if (g_real_slots > MAX_SLOTS - 1) g_real_slots = MAX_SLOTS - 1;
-    } else {
-        g_real_slots = 10;
+    int slot_min, slot_max, tracking_min;
+    if (read_absinfo(g_real_fd, ABS_MT_SLOT, &slot_min, &slot_max) < 0 ||
+        slot_min != 0 || slot_max < 0 || slot_max >= MAX_SLOTS - 1) {
+        respond("ERR unsupported_slots");
+        return -1;
+    }
+    g_real_slots = slot_max + 1;
+    if (read_absinfo(g_real_fd, ABS_MT_TRACKING_ID, &tracking_min,
+                     &g_real_tracking_max) < 0 || tracking_min != 0 ||
+        g_real_tracking_max < 0 || g_real_tracking_max > 65535) {
+        respond("ERR unsupported_tracking_range");
+        return -1;
     }
     g_macro_slot = g_real_slots; /* one past last real slot */
 
@@ -461,8 +602,12 @@ static int do_engage(int display_w, int display_h) {
     memset(g_slots, 0, sizeof(g_slots));
     for (int i = 0; i < MAX_SLOTS; i++) g_slots[i].tracking_id = -1;
     g_btn_touch = false;
-    g_current_slot = 0;
+    g_real_current_slot = 0;
     g_in_packet = false;
+    g_output_slot = 0;
+    g_next_output_tracking = 0;
+    g_io_error = false;
+    if (g_fatal) return -1;
 
     if (wait_until_idle(g_real_fd, IDLE_WAIT_MS) < 0) {
         respond("ERR screen_busy");
@@ -482,6 +627,12 @@ static int do_engage(int display_w, int display_h) {
     }
 
     g_merging = true;
+    /* Recheck after grab: contacts may have arrived while uinput was created. */
+    if (wait_until_idle(g_real_fd, 250) < 0) {
+        ungrab_and_destroy();
+        respond("ERR screen_busy_after_grab");
+        return -1;
+    }
     g_grabbed_at_ms = now_ms();
     g_last_ping_ms = g_grabbed_at_ms;
     char buf[128];
@@ -498,6 +649,11 @@ static void do_release(void) {
 static void do_tap(int x, int y, int hold_ms) {
     if (!g_merging) {
         respond("ERR not_merging");
+        return;
+    }
+    if (g_in_packet && g_tap.active && g_tap.down_sent) {
+        /* Never insert a synthetic SYN_REPORT into a partial real frame. */
+        respond("ERR frame_busy");
         return;
     }
     if (g_tap.active && g_tap.down_sent) {
@@ -554,6 +710,25 @@ static void handle_command(char *line) {
     respond("ERR unknown_cmd");
 }
 
+static bool check_poll_result(int result, int error, short control, short real) {
+    if (result < 0 && error == EINTR) return true;
+    if (result < 0 || ((control | real) & (POLLERR | POLLHUP | POLLNVAL))) {
+        fail_closed();
+        return false;
+    }
+    return true;
+}
+
+static bool valid_real_read(ssize_t n, int error) {
+    if (n < 0 && (error == EINTR || error == EAGAIN || error == EWOULDBLOCK))
+        return true;
+    if (n <= 0 || n % (ssize_t)sizeof(struct input_event) != 0) {
+        fail_closed();
+        return false;
+    }
+    return true;
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
@@ -577,7 +752,7 @@ int main(int argc, char **argv) {
     g_last_ping_ms = now_ms();
 
     for (;;) {
-        struct pollfd fds[2];
+        struct pollfd fds[2] = {0};
         fds[0].fd = STDIN_FILENO;
         fds[0].events = POLLIN;
         fds[1].fd = g_real_fd;
@@ -590,7 +765,9 @@ int main(int argc, char **argv) {
         }
 
         int pr = poll(fds, g_merging ? 2 : 1, timeout);
-        (void)pr;
+        if (pr < 0 && errno == EINTR) continue;
+        if (!check_poll_result(pr, errno, fds[0].revents,
+                               g_merging ? fds[1].revents : 0)) break;
 
         if (now_ms() - g_last_ping_ms > HEARTBEAT_MS) {
             /* App silent — give the screen back. */
@@ -604,9 +781,14 @@ int main(int argc, char **argv) {
         if (fds[0].revents & POLLIN) {
             char buf[128];
             ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
-            if (n <= 0) {
+            if (n == 0) {
                 do_release();
                 break;
+            }
+            if (n < 0) {
+                if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    g_io_error = true;
+                }
             }
             for (ssize_t i = 0; i < n; i++) {
                 char c = buf[i];
@@ -625,20 +807,32 @@ int main(int argc, char **argv) {
         if (g_merging && (fds[1].revents & POLLIN)) {
             struct input_event evs[MAX_EVENTS];
             ssize_t n = read(g_real_fd, evs, sizeof(evs));
+            if (!valid_real_read(n, errno)) break;
             if (n > 0) {
                 size_t count = (size_t)n / sizeof(struct input_event);
-                for (size_t i = 0; i < count; i++) {
+                for (size_t i = 0; i < count && !g_fatal && !g_io_error; i++) {
                     handle_real_event(&evs[i]);
                 }
             }
+        }
+
+        if (g_io_error || g_fatal) {
+            fail_closed();
+            respond("ERR stream_failed");
+            break;
         }
 
         /* Advance macro UP even if screen is idle (no SYN from real). */
         if (g_merging && g_tap.active && !g_in_packet) {
             flush_pending_macro_at_syn();
         }
+        if (g_io_error) {
+            fail_closed();
+            break;
+        }
     }
 
+    ungrab_and_destroy();
     if (g_real_fd >= 0) close(g_real_fd);
-    return 0;
+    return g_fatal ? 1 : 0;
 }

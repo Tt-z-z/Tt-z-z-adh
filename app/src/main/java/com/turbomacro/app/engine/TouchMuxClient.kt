@@ -15,6 +15,7 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.lang.reflect.InvocationTargetException
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
@@ -70,7 +71,9 @@ class TouchMuxClient(private val appContext: Context) {
             if (!startProcessLocked()) return false
             val (w, h) = displaySize()
             val resp = sendAndWaitLocked("ENGAGE $w $h", timeoutMs = 6000L) ?: run {
+                merging.set(false)
                 lastError.set("engage_timeout")
+                destroyProcessLocked()
                 return false
             }
             if (resp.startsWith("OK MERGING") || resp.startsWith("OK ALREADY")) {
@@ -81,6 +84,8 @@ class TouchMuxClient(private val appContext: Context) {
             }
             lastError.set(resp)
             Log.w(TAG, "ENGAGE failed: $resp")
+            merging.set(false)
+            destroyProcessLocked()
             return false
         }
     }
@@ -89,18 +94,17 @@ class TouchMuxClient(private val appContext: Context) {
         lock.withLock {
             if (!merging.get()) return false
             val resp = sendAndWaitLocked("TAP $x $y $holdMs", timeoutMs = 350L) ?: return false
-            return resp.startsWith("OK")
+            if (resp.startsWith("OK")) return true
+            lastError.set(resp)
+            destroyProcessLocked()
+            return false
         }
     }
 
     fun release() {
         lock.withLock {
-            stopHeartbeatLocked()
-            try {
-                sendAndWaitLocked("RELEASE", timeoutMs = 800L)
-            } catch (_: Throwable) {
-            }
             merging.set(false)
+            // 终止 helper 释放 grab，不向可能已堵塞的管道同步写 RELEASE。
             destroyProcessLocked()
         }
     }
@@ -178,6 +182,9 @@ class TouchMuxClient(private val appContext: Context) {
             val remote = method.invoke(null, arrayOf(bin.absolutePath), null, null)
                 ?: return false.also { lastError.set("newProcess_null") }
 
+            remoteProcess = remote
+            lastError.set(null)
+            processError.set(null)
             val getInput = remote.javaClass.methods.first {
                 it.name == "getInputStream" && it.parameterTypes.isEmpty()
             }
@@ -195,23 +202,18 @@ class TouchMuxClient(private val appContext: Context) {
             errorReader = (errorMethod?.invoke(remote) as? java.io.InputStream)?.let {
                 BufferedReader(InputStreamReader(it))
             }
-            processError.set(null)
-            remoteProcess = remote
-
             val readyLine = readLineLimited(5000L)
-            if (readyLine == null) {
-                val detail = readErrorSnapshot()
-                lastError.set(detail ?: "start:null")
-            }
             if (readyLine == null || !readyLine.startsWith("OK READY")) {
-                lastError.set(readErrorSnapshot() ?: readyLine ?: "helper_no_ready")
+                val detail = processError.get() ?: readErrorSnapshot()
+                lastError.set(detail ?: readyLine ?: lastError.get() ?: "helper_no_ready")
                 destroyProcessLocked()
                 return false
             }
             true
         } catch (e: Throwable) {
-            Log.e(TAG, "startProcess failed", e)
-            lastError.set("start:${e.message}")
+            val cause = (e as? InvocationTargetException)?.targetException ?: e
+            Log.e(TAG, "startProcess failed", cause)
+            lastError.set("start:${cause.message ?: cause.javaClass.simpleName}")
             destroyProcessLocked()
             false
         }
@@ -220,11 +222,15 @@ class TouchMuxClient(private val appContext: Context) {
     private fun readErrorSnapshot(): String? {
         val r = errorReader ?: return null
         return try {
-            val parts = mutableListOf<String>()
-            while (r.ready() && parts.size < 4) {
-                r.readLine()?.trim()?.takeIf { it.isNotEmpty() }?.let(parts::add)
+            // ready 只保证下一字符可读，不能据此调用可能等待换行的 readLine。
+            val chars = StringBuilder()
+            var remaining = 2048
+            while (remaining-- > 0 && r.ready()) {
+                val ch = r.read()
+                if (ch < 0) break
+                chars.append(ch.toChar())
             }
-            parts.joinToString(" | ").takeIf { it.isNotBlank() }
+            chars.toString().trim().takeIf { it.isNotEmpty() }
         } catch (_: Throwable) {
             null
         }
@@ -239,8 +245,8 @@ class TouchMuxClient(private val appContext: Context) {
             readLineLimited(timeoutMs)
         } catch (e: Throwable) {
             Log.w(TAG, "send failed: ${e.message}")
-            lastError.set("io:${e.message}")
-            merging.set(false)
+            lastError.set("io:${e.message ?: e.javaClass.simpleName}")
+            destroyProcessLocked()
             null
         }
     }
@@ -248,12 +254,21 @@ class TouchMuxClient(private val appContext: Context) {
     private fun readLineLimited(timeoutMs: Long): String? {
         val r = reader ?: return null
         val future = ioExecutor.submit<String?> { r.readLine() }
-        return try {
+        val response = try {
             future.get(timeoutMs, TimeUnit.MILLISECONDS)
-        } catch (_: Throwable) {
+        } catch (e: Exception) {
+            lastError.set("read:${e.javaClass.simpleName}")
+            if (e is InterruptedException) Thread.currentThread().interrupt()
             future.cancel(true)
             null
         }
+        if (response == null) {
+            // 中断不保证解除 readLine；失效状态先发布，再终止进程解除管道读取。
+            merging.set(false)
+            processError.set(readErrorSnapshot())
+            destroyProcessLocked()
+        }
+        return response
     }
 
     private fun startHeartbeatLocked() {
@@ -266,7 +281,8 @@ class TouchMuxClient(private val appContext: Context) {
                 val resp = sendAndWaitLocked("PING", timeoutMs = 400L)
                 if (resp == null || !resp.startsWith("OK")) {
                     Log.w(TAG, "heartbeat lost: $resp")
-                    merging.set(false)
+                    if (resp != null) lastError.set(resp)
+                    destroyProcessLocked()
                 }
             } finally {
                 lock.unlock()
@@ -275,39 +291,31 @@ class TouchMuxClient(private val appContext: Context) {
     }
 
     private fun stopHeartbeatLocked() {
-        heartbeat?.cancel(true)
+        heartbeat?.cancel(false)
         heartbeat = null
     }
 
     private fun destroyProcessLocked() {
         stopHeartbeatLocked()
-        try {
-            writer?.write("QUIT\n")
-            writer?.flush()
-        } catch (_: Throwable) {
-        }
-        try {
-            writer?.close()
-        } catch (_: Throwable) {
-        }
-        try {
-            reader?.close()
-        } catch (_: Throwable) {
-        }
-        writer = null
-        reader = null
-        errorReader = null
+        // 不再同步写 QUIT：writer 可能正被阻塞的调用占用，release 必须可继续清理。
         val remote = remoteProcess
         remoteProcess = null
         merging.set(false)
+        // destroy 必须先于 close：关闭 BufferedReader 可能等待仍在 readLine 的任务，
+        // 而远端进程只有先退出才能可靠地产生 EOF，避免 release 死锁。
         if (remote != null) {
             try {
-                val destroy = remote.javaClass.methods.firstOrNull {
+                remote.javaClass.methods.firstOrNull {
                     it.name == "destroy" && it.parameterTypes.isEmpty()
-                }
-                destroy?.invoke(remote)
+                }?.invoke(remote)
             } catch (_: Throwable) {
             }
         }
+        try { writer?.close() } catch (_: Throwable) {}
+        try { reader?.close() } catch (_: Throwable) {}
+        try { errorReader?.close() } catch (_: Throwable) {}
+        writer = null
+        reader = null
+        errorReader = null
     }
 }

@@ -29,6 +29,7 @@ import com.turbomacro.app.model.ActionType
 import com.turbomacro.app.model.MacroProfile
 import com.turbomacro.app.model.MacroStep
 import com.turbomacro.app.storage.ProfileRepository
+import java.util.concurrent.Executors
 
 /**
  * 小米 Game Turbo 风格悬浮窗总控中心（全局单例 + 双通道「音量+」呼出编辑）
@@ -77,7 +78,13 @@ class OverlayController private constructor(
     private var miniDockParams: WindowManager.LayoutParams? = null
     private var stepConfigPopupView: View? = null
 
+    @Volatile
     private var isShowing = false
+    @Volatile
+    private var overlayGeneration = 0L
+    private val muxLifecycleExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "touchmux-lifecycle").apply { isDaemon = true }
+    }
     private var isCombatLocked = true
 
     // 音量+ 广播防抖与自动恢复音量
@@ -141,7 +148,7 @@ class OverlayController private constructor(
                 val detail = touchInjector.muxError() ?: "unknown"
                 Toast.makeText(
                     context,
-                    "需要先启用多指通道：松开屏幕全部手指约 1 秒，再按住开火键（$detail）",
+                    "需要先启用多指通道：松开屏幕全部手指，再关闭并重新打开悬浮键（$detail）",
                     Toast.LENGTH_LONG
                 ).show()
             }
@@ -151,6 +158,10 @@ class OverlayController private constructor(
     fun isOverlayShowing(): Boolean = isShowing
 
     fun showOverlay() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { showOverlay() }
+            return
+        }
         if (isShowing) return
         currentProfile = repository.loadProfile()
         isCombatLocked = true
@@ -216,15 +227,16 @@ class OverlayController private constructor(
         windowManager.addView(btn, triggerLp)
         triggerButton = btn
         triggerParams = triggerLp
+        isShowing = true
+        val generation = ++overlayGeneration
 
         // 编辑条战斗态不挂到 WindowManager（GONE 仍可能占窗影响触控），编辑时再 attach
         // 音量+ 广播呼出编辑
         registerVolumeUpReceiver()
 
-        isShowing = true
-
-        // 启动 TouchMux：必须短暂无触摸才能 EVIOCGRAB，否则会拖枪即断
+        // 所有 ENGAGE/RELEASE 串行执行；hide 只入队，不在主线程等待锁。
         mainHandler.post {
+            if (!isShowing || overlayGeneration != generation) return@post
             if (!touchInjector.isShizukuReady()) {
                 Toast.makeText(
                     context,
@@ -238,25 +250,20 @@ class OverlayController private constructor(
                 "正在启用多指通道：请松开屏幕全部手指…",
                 Toast.LENGTH_SHORT
             ).show()
-            Thread {
+            muxLifecycleExecutor.execute {
+                if (!isShowing || overlayGeneration != generation) return@execute
                 val ok = touchInjector.ensureMuxReady()
-                mainHandler.post {
-                    if (ok) {
-                        Toast.makeText(
-                            context,
-                            "✅ 多指通道已就绪：按住开火键连点，可同时拖枪/走位。编辑：音量+ 或连点钮3下",
-                            Toast.LENGTH_LONG
-                        ).show()
+                mainHandler.post result@{
+                    if (!isShowing || overlayGeneration != generation) return@result
+                    val message = if (ok) {
+                        "✅ 多指通道已就绪：按住开火键连点，可同时拖枪/走位。编辑：音量+ 或连点钮3下"
                     } else {
                         val err = touchInjector.muxError() ?: "unknown"
-                        Toast.makeText(
-                            context,
-                            "多指通道未就绪（$err）。请松开全部手指后再开一次悬浮键，或先按住开火键时会自动重试",
-                            Toast.LENGTH_LONG
-                        ).show()
+                        "多指通道未就绪（$err）。请松开全部手指后再重新打开悬浮键"
                     }
+                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
                 }
-            }.start()
+            }
         }
     }
 
@@ -293,10 +300,19 @@ class OverlayController private constructor(
     }
 
     fun hideOverlay() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { hideOverlay() }
+            return
+        }
         if (!isShowing) return
+        isShowing = false
+        overlayGeneration++
         unregisterVolumeUpReceiver()
         macroEngine.forceStop()
-        touchInjector.releaseMux()
+        // 与此前的 ENGAGE 串行；不在主线程等待 TouchMux 的锁或 IO。
+        muxLifecycleExecutor.execute {
+            touchInjector.releaseMux()
+        }
         dismissStepInspectorPopup()
         detachTargetEditor()
 
@@ -308,8 +324,6 @@ class OverlayController private constructor(
         triggerParams = null
 
         detachMiniDock()
-
-        isShowing = false
     }
 
     private fun detachMiniDock() {

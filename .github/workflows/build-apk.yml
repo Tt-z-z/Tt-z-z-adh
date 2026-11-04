@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-apk:
@@ -19,6 +19,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Run host TouchMux regression tests
+        run: |
+          set -euo pipefail
+          cc -std=gnu11 -Wall -Wextra -g -O1 \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            tests/touchmux_test.c -o /tmp/touchmux-tests
+          timeout 30s /tmp/touchmux-tests
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -60,10 +68,10 @@ jobs:
           set -euo pipefail
           test -f local.properties
           gradle assembleDebug --no-daemon --stacktrace
-          cp app/build/outputs/apk/debug/app-debug.apk TurboMacro-v1.6.1.apk
-          unzip -l TurboMacro-v1.6.1.apk | grep -E 'lib/.*/libtouchmux' || (
+          cp app/build/outputs/apk/debug/app-debug.apk TurboMacro-v1.6.2.apk
+          unzip -l TurboMacro-v1.6.2.apk | grep -E 'lib/.*/libtouchmux' || (
             echo "ERROR: libtouchmux.so missing from APK" >&2
-            unzip -l TurboMacro-v1.6.1.apk | grep '\.so' || true
+            unzip -l TurboMacro-v1.6.2.apk | grep '\.so' || true
             exit 1
           )
 
@@ -71,29 +79,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: TurboMacro-Debug-APK
-          path: TurboMacro-v1.6.1.apk
+          path: TurboMacro-v1.6.2.apk
           if-no-files-found: error
 
-      - name: Publish APK to GitHub Releases
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v1.6.1
-          name: "TurboMacro v1.6.1（TouchMux 多指合并 · 拖枪不中断）"
-          body: |
-            覆盖安装 `TurboMacro-v1.6.1.apk`。
-
-            ## 根因
-            Android 每个窗口同时只跟进一个触控设备。`input tap` / 合成 MotionEvent = 第二台设备抢焦点，正在滑动的手指会被丢掉。
-
-            ## TouchMux
-            1. Shizuku 启动 `libtouchmux.so`
-            2. EVIOCGRAB 抢占物理触控屏，转发到虚拟设备
-            3. 开火点按加在**同一设备额外 MT 槽**
-            4. 按住期间禁用 input tap / 无障碍
-            5. 常驻进程 + 非阻塞心跳，去掉每发 fork 的卡顿
-
-            ## 使用
-            - Shizuku +「USB 调试（安全设置）」
-            - 开悬浮键时**松开全部手指约 1 秒**
-            - 关悬浮键会归还触控屏
-          files: TurboMacro-v1.6.1.apk
+      # 调试阶段只保存构建产物，不自动发布或覆盖 Release。
+      # 编译成功不代表设备兼容性及触摸恢复路径已经验证。

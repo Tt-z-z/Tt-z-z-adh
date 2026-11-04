@@ -29,25 +29,28 @@ class HoldToRunMacroEngine(
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val isHolding = AtomicBoolean(false)
+    private val sessionLock = Any()
+    private var runGeneration = 0L
     private var activeJob: Job? = null
     private var hasWarnedBlocked = false
 
     fun isRunning(): Boolean = isHolding.get()
 
-    fun onTriggerPressDown(service: AccessibilityService?, profile: MacroProfile) {
+    fun onTriggerPressDown(service: AccessibilityService?, profile: MacroProfile): Unit = synchronized(sessionLock) {
         val stepsSnapshot = profile.steps.map { it.copy() }
         if (stepsSnapshot.isEmpty()) return
 
+        // 触发按下路径不能同步抢屏：ensureMuxReady 可能等待 helper 响应，
+        // 会阻塞主线程并使松手事件延迟。ENGAGE 只由 OverlayController 后台初始化。
         if (!touchInjector.isMuxMerging()) {
-            // 尝试自动 ENGAGE（若用户正按着屏幕会失败，提示抬手）
-            val ok = touchInjector.ensureMuxReady()
-            if (!ok || !touchInjector.isMuxMerging()) {
-                onRequireMux()
-                return
-            }
+            onRequireMux()
+            return
         }
 
-        if (!isHolding.compareAndSet(false, true)) return
+        if (isHolding.get()) return
+        isHolding.set(true)
+        val generation = ++runGeneration
+        hasWarnedBlocked = false
 
         if (profile.enableHaptics) {
             hapticEngine.performTriggerDown()
@@ -96,9 +99,17 @@ class HoldToRunMacroEngine(
                             }
                         }
 
-                        if (!injectedOk && !hasWarnedBlocked) {
-                            hasWarnedBlocked = true
-                            onInjectionBlockedWarning()
+                        if (!injectedOk) {
+                            synchronized(sessionLock) {
+                                if (runGeneration == generation && isHolding.get()) {
+                                    isHolding.set(false)
+                                    if (!hasWarnedBlocked) {
+                                        hasWarnedBlocked = true
+                                        onInjectionBlockedWarning()
+                                    }
+                                }
+                            }
+                            return@launch
                         }
 
                         var waitRemaining = step.intervalAfterMs.coerceAtLeast(12L)
@@ -111,23 +122,30 @@ class HoldToRunMacroEngine(
                 } while (profile.loopWhileHeld && isHolding.get() && isActive)
             } catch (_: CancellationException) {
             } finally {
-                isHolding.set(false)
-                onRunStateChanged(false)
+                // 旧协程被取消后不能清除随后启动的新一轮按住状态。
+                synchronized(sessionLock) {
+                    if (runGeneration == generation) {
+                        isHolding.set(false)
+                        onRunStateChanged(false)
+                    }
+                }
             }
         }
     }
 
-    fun onTriggerReleaseUp(profile: MacroProfile) {
-        if (!isHolding.compareAndSet(true, false)) return
+    fun onTriggerReleaseUp(profile: MacroProfile): Unit = synchronized(sessionLock) {
+        ++runGeneration
+        val wasHolding = isHolding.getAndSet(false)
         activeJob?.cancel()
         activeJob = null
-        if (profile.enableHaptics) {
+        if (wasHolding && profile.enableHaptics) {
             hapticEngine.performTriggerUp()
         }
         onRunStateChanged(false)
     }
 
-    fun forceStop() {
+    fun forceStop(): Unit = synchronized(sessionLock) {
+        ++runGeneration
         isHolding.set(false)
         activeJob?.cancel()
         activeJob = null
