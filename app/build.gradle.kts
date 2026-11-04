@@ -14,8 +14,8 @@ android {
         applicationId = "com.turbomacro.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "1.7.1"
+        versionCode = 28
+        versionName = "1.8.0"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

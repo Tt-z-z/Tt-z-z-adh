@@ -29,8 +29,7 @@ class TouchMuxClient(private val appContext: Context) {
     companion object {
         private const val TAG = "TouchMuxClient"
         private const val LIB_NAME = "libtouchmux.so"
-        private const val SESSION_LIMIT_SECONDS = 10 * 60
-        private const val OUTER_TIMEOUT_SECONDS = SESSION_LIMIT_SECONDS + 2
+        private const val SESSION_LIMIT_SECONDS = 30 * 60
     }
 
     private val lock = ReentrantLock()
@@ -61,7 +60,7 @@ class TouchMuxClient(private val appContext: Context) {
 
     fun diagnosticStatus(): String = when {
         diagnosticStartedAt != 0L && diagnosticRemainingSeconds() == 0 -> "已到期"
-        merging.get() -> "就绪 ${diagnosticRemainingSeconds()}s"
+        merging.get() -> "就绪"
         lastError() != null -> "失败"
         else -> "未就绪"
     }
@@ -254,8 +253,8 @@ class TouchMuxClient(private val appContext: Context) {
             )
             method.isAccessible = true
             diagnosticStartedAt = android.os.SystemClock.elapsedRealtime()
-            trace("HELPER_START budgetMs=${SESSION_LIMIT_SECONDS * 1000L}")
-            val remote = method.invoke(null, arrayOf("/system/bin/timeout", "-k", "1s", "${OUTER_TIMEOUT_SECONDS}s", bin.absolutePath, "--diagnostic-seconds", SESSION_LIMIT_SECONDS.toString()), null, null)
+            trace("HELPER_START watchdogMs=${SESSION_LIMIT_SECONDS * 1000L}")
+            val remote = method.invoke(null, arrayOf(bin.absolutePath, "--diagnostic-seconds", SESSION_LIMIT_SECONDS.toString()), null, null)
                 ?: return false.also { lastError.set("newProcess_null") }
 
             remoteProcess = remote
@@ -373,7 +372,13 @@ class TouchMuxClient(private val appContext: Context) {
 
     private fun destroyProcessLocked() {
         stopHeartbeatLocked()
-        // 不再同步写 QUIT：writer 可能正被阻塞的调用占用，release 必须可继续清理。
+        // 先礼貌请求 helper 释放 EVIOCGRAB/uinput；随后无论结果如何都销毁进程。
+        // 这里不调用 sendAndWaitLocked，避免清理路径等待自身的 IO 任务。
+        try {
+            writer?.write("QUIT\n")
+            writer?.flush()
+        } catch (_: Throwable) {
+        }
         val remote = remoteProcess
         remoteProcess = null
         merging.set(false)

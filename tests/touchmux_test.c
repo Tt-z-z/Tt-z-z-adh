@@ -229,15 +229,15 @@ static void test_options(void) {
     char *low[] = {"touchmux", "--diagnostic-seconds", "1", "--no-tap"};
     assert(parse_options(4, low, 1000));
     assert(g_no_tap && g_diagnostic_deadline_ms == 2000);
-    char *high[] = {"touchmux", "--no-tap", "--diagnostic-seconds", "600"};
+    char *high[] = {"touchmux", "--no-tap", "--diagnostic-seconds", "1800"};
     assert(parse_options(4, high, 1000));
-    assert(g_no_tap && g_diagnostic_deadline_ms == 601000);
-    const char *invalid[] = {"", "0", "601", "-1", "+1", " 1", "1 ", 
+    assert(g_no_tap && g_diagnostic_deadline_ms == 1801000);
+    const char *invalid[] = {"", "0", "1801", "-1", "+1", " 1", "1 ", 
                              "1.5", "1s", "99999999999999999999999"};
     for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
         char *args[] = {"touchmux", "--diagnostic-seconds", (char *)invalid[i]};
         assert(!parse_options(3, args, 1000));
-        assert(g_no_tap && g_diagnostic_deadline_ms == 601000);
+        assert(g_no_tap && g_diagnostic_deadline_ms == 1801000);
         /* Invalid CLI returns before opening any device. */
         assert(touchmux_program_main(3, args) == 2);
     }

@@ -179,7 +179,7 @@ class MainActivity : AppCompatActivity() {
         }
         val guideText = TextView(this).apply {
             text = "限时触控验证（不是长期游戏版）：\n" +
-                "1. Shizuku 授权后才能初始化；每轮最长 10 分钟，到期不自动重新接管。\n" +
+                "1. Shizuku 授权后才能初始化；单轮最多 30 分钟，到期不自动重新接管。\n" +
                 "2. 已验证本机竖屏低频诊断场景，游戏内、横屏和高频仍待验证。\n" +
                 "3. 快速按松仅触发宏，不再三击进入编辑。编辑请用下方独立按钮或音量+。"
             setTextColor(Color.parseColor("#90A4AE"))

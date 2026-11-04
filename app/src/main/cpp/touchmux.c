@@ -151,7 +151,7 @@ static bool parse_options(int argc, char **argv, int64_t started_ms) {
             for (const char *p = argv[i]; *p; ++p) {
                 if (*p < '0' || *p > '9') return false;
                 seconds = seconds * 10 + (*p - '0');
-                if (seconds > 10 * 60) return false;
+                if (seconds > 30 * 60) return false;
             }
             if (seconds < 1) return false;
         } else {
@@ -809,7 +809,7 @@ static bool valid_real_read(ssize_t n, int error) {
 int main(int argc, char **argv) {
     int64_t started_ms = now_ms();
     if (!parse_options(argc, argv, started_ms)) {
-        respond("ERR args: [--diagnostic-seconds 1..600] [--no-tap]");
+        respond("ERR args: [--diagnostic-seconds 1..1800] [--no-tap]");
         return 2;
     }
     setvbuf(stdin, NULL, _IONBF, 0);
