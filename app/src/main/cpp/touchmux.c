@@ -213,6 +213,14 @@ static int read_absinfo(int fd, int code, int *min_v, int *max_v) {
     if (ioctl(fd, request, arg) < 0) { close(fd); return -1; } \
 } while (0)
 
+static bool g_has_pressure = false;
+static bool g_has_touch_major = false;
+
+static void configure_optional_axes(const unsigned long *bits) {
+    g_has_pressure = bit_test(bits, ABS_MT_PRESSURE) != 0;
+    g_has_touch_major = bit_test(bits, ABS_MT_TOUCH_MAJOR) != 0;
+}
+
 static int create_virtual(int real_fd, const char *name_suffix) {
     int fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
     if (fd < 0) fd = open("/dev/input/uinput", O_WRONLY | O_NONBLOCK);
@@ -231,9 +239,6 @@ static int create_virtual(int real_fd, const char *name_suffix) {
     CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_TRACKING_ID);
     CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_POSITION_X);
     CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_POSITION_Y);
-    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_TOUCH_MAJOR);
-    CHECK_UI(fd, UI_SET_ABSBIT, ABS_MT_PRESSURE);
-
     struct uinput_abs_setup abs;
     memset(&abs, 0, sizeof(abs));
 
@@ -256,20 +261,13 @@ static int create_virtual(int real_fd, const char *name_suffix) {
     abs.absinfo.maximum = g_abs_y_max;
     CHECK_UI(fd, UI_ABS_SETUP, &abs);
 
-    abs.code = ABS_MT_TOUCH_MAJOR;
-    abs.absinfo.maximum = 255;
-    CHECK_UI(fd, UI_ABS_SETUP, &abs);
-
-    abs.code = ABS_MT_PRESSURE;
-    abs.absinfo.maximum = 255;
-    CHECK_UI(fd, UI_ABS_SETUP, &abs);
-
     /* Preserve every advertised per-contact axis (orientation, distance, etc.). */
     unsigned long bits[(ABS_MAX / (sizeof(unsigned long) * 8)) + 1] = {0};
     if (ioctl(real_fd, EVIOCGBIT(EV_ABS, sizeof(bits)), bits) < 0) {
         close(fd);
         return -1;
     }
+    configure_optional_axes(bits);
     for (int code = ABS_MT_TOUCH_MAJOR; code <= ABS_MT_TOOL_Y; ++code) {
         if (code == ABS_MT_TRACKING_ID || !bit_test(bits, code)) continue;
         memset(&abs, 0, sizeof(abs));
@@ -397,8 +395,8 @@ static void emit_macro_down(void) {
     emit(EV_ABS, ABS_MT_TRACKING_ID, tid);
     emit(EV_ABS, ABS_MT_POSITION_X, ax);
     emit(EV_ABS, ABS_MT_POSITION_Y, ay);
-    emit(EV_ABS, ABS_MT_TOUCH_MAJOR, 9);
-    emit(EV_ABS, ABS_MT_PRESSURE, 40);
+    if (g_has_touch_major) emit(EV_ABS, ABS_MT_TOUCH_MAJOR, 9);
+    if (g_has_pressure) emit(EV_ABS, ABS_MT_PRESSURE, 40);
     g_tap.down_sent = true;
     sync_btn_touch();
     emit(EV_SYN, SYN_REPORT, 0);

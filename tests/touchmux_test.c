@@ -42,6 +42,8 @@ static void send_event(int type, int code, int value) {
 }
 
 static void reset_test_state(void) {
+    g_has_pressure = true;
+    g_has_touch_major = true;
     g_diagnostic_deadline_ms = 0;
     g_no_tap = false;
     g_test_now_ms = -1;
@@ -330,7 +332,32 @@ static void test_diagnostic_deadline(void) {
     assert(!g_fatal && g_test_cleanup_count == 0);
 }
 
+static void test_optional_axes(void) {
+    reset_test_state();
+    unsigned long bits[(ABS_MAX / (sizeof(unsigned long) * 8)) + 1] = {0};
+    const int word_bits = sizeof(unsigned long) * 8;
+    bits[ABS_MT_TOUCH_MAJOR / word_bits] |= 1UL << (ABS_MT_TOUCH_MAJOR % word_bits);
+    configure_optional_axes(bits);
+    assert(g_has_touch_major && !g_has_pressure);
+    g_tap.active = true;
+    g_tap.x = 10;
+    g_tap.y = 20;
+    emit_macro_down();
+    bool saw_major = false;
+    for (size_t i = 0; i < g_test_event_count; ++i) {
+        const struct input_event *ev = &g_test_events[i];
+        if (ev->type != EV_ABS) continue;
+        assert(ev->code != ABS_MT_PRESSURE);
+        if (ev->code == ABS_MT_TOUCH_MAJOR) saw_major = true;
+    }
+    assert(saw_major);
+    memset(bits, 0, sizeof(bits));
+    configure_optional_axes(bits);
+    assert(!g_has_pressure && !g_has_touch_major);
+}
+
 int main(void) {
+    test_optional_axes();
     test_options();
     test_no_tap();
     test_diagnostic_deadline();
