@@ -38,10 +38,10 @@ import java.util.concurrent.Executors
  * 1. 当你只开了 Shizuku（没开无障碍）或者覆盖安装后无障碍未重启时，`AccessibilityService.onKeyEvent` 根本不会触发！
  * 2. 之前 `MainActivity` 和 `MacroAccessibilityService` 各自创建了不同的 `OverlayController` 实例，导致按键事件发到了空实例上！
  *
- * 彻底根治方案（3重保障，100% 呼出编辑模式）：
+ * 编辑入口：配置页独立按钮，以及设备支持时的音量+监听。
  * - 【保障 1：系统级音量广播监听 (`VOLUME_CHANGED_ACTION`)】：无论开没开无障碍、无论在哪个全屏游戏里，只要按一下手机「音量+」，系统底层广播立即触发切换编辑模式，并自动把音量还原（不吵人）！
  * - 【保障 2：无障碍硬件按键拦截 (`onKeyEvent`)】：若开启了无障碍，直接底层接管「音量+」。
- * - 【保障 3：触发键快速双击/三击手势兜底】：在悬浮触发圆环上「快速连点 3 下」也可随时进入编辑模式！
+ * - 战斗按钮不承担编辑手势，避免快速按松打开全屏编辑窗口。
  */
 class OverlayController private constructor(
     private val context: Context
@@ -218,9 +218,6 @@ class OverlayController private constructor(
                 if (currentProfile.steps.isNotEmpty()) {
                     showStepInspectorPopup(currentProfile.steps.first())
                 }
-            },
-            onQuickEditGesture = {
-                toggleCombatEditMode()
             }
         ).apply {
             idleAlpha = currentProfile.triggerAlpha
@@ -277,7 +274,7 @@ class OverlayController private constructor(
                     }
                     updateStatus.run()
                     val message = if (ok) {
-                        "✅ 多指通道已就绪：按住开火键连点，可同时拖枪/走位。编辑：音量+ 或连点钮3下"
+                        "✅ 多指通道已就绪：按住开火键连点，可同时拖枪/走位。编辑：配置页或音量+"
                     } else {
                         val err = touchInjector.muxError() ?: "unknown"
                         "多指通道未就绪（$err）。请松开全部手指后再重新打开悬浮键"

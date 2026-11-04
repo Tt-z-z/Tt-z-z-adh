@@ -5,7 +5,6 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
 import kotlin.math.abs
@@ -22,8 +21,7 @@ class FloatingTriggerButtonView(
     private val onHoldStart: () -> Unit,
     private val onHoldEnd: () -> Unit,
     private val onDragMoved: (newX: Int, newY: Int) -> Unit,
-    private val onOpenMenuClicked: () -> Unit,
-    private val onQuickEditGesture: () -> Unit = {}
+    private val onOpenMenuClicked: () -> Unit
 ) : View(context) {
 
     var diagnosticLabel: String = "准备中"
@@ -67,9 +65,6 @@ class FloatingTriggerButtonView(
     private var lastRawX = 0f
     private var lastRawY = 0f
     private var hasDragged = false
-    private var tapStreakCount = 0
-    private var lastTapDownUptimeMs = 0L
-
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = Color.parseColor("#CC141923")
@@ -145,16 +140,7 @@ class FloatingTriggerButtonView(
         if (isLockedForCombat) {
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    val now = SystemClock.uptimeMillis()
-                    if (now - lastTapDownUptimeMs <= 320L) tapStreakCount++ else tapStreakCount = 1
-                    lastTapDownUptimeMs = now
-                    if (tapStreakCount >= 3) {
-                        tapStreakCount = 0
-                        endCombatHold()
-                        onQuickEditGesture()
-                        refreshVisualState()
-                        return true
-                    }
+                    // 快速反复按松也只触发宏，不复用为编辑手势。
                     // 只认最初按下的手指；其他手指不能接替触发权。
                     endCombatHold()
                     holdPointerId = event.getPointerId(event.actionIndex)

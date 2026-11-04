@@ -178,15 +178,23 @@ class MainActivity : AppCompatActivity() {
             }
         }
         val guideText = TextView(this).apply {
-            text = "三角洲（多指不受影响）：\n" +
-                "1. 必须 Shizuku +「USB 调试（安全设置）」——按住悬浮钮连点开火；走位/瞄准用其他手指，互不抢触控。\n" +
-                "2. 未开 Shizuku 时按住会直接拒绝（无障碍连发会清掉屏幕其他手指，已禁用）。\n" +
-                "3. 编辑：音量+ 或连点悬浮钮 3 下；靶点对准开火键后锁定。可调按钮大小。"
+            text = "限时触控验证（不是长期游戏版）：\n" +
+                "1. Shizuku 授权后才能初始化；每轮最多 15 秒，到期不自动重新接管。\n" +
+                "2. 已验证本机竖屏低频诊断场景，游戏内、横屏和高频仍待验证。\n" +
+                "3. 快速按松仅触发宏，不再三击进入编辑。编辑请用下方独立按钮或音量+。"
             setTextColor(Color.parseColor("#90A4AE"))
             textSize = 12.5f
             setPadding(0, dp(12), 0, 0)
         }
         launchCard.addView(toggleOverlayButton)
+        launchCard.addView(createActionButton("切换编辑 / 锁定（不启动接管）") {
+            val ctrl = getActiveOverlayController()
+            if (ctrl.isOverlayShowing()) {
+                ctrl.toggleCombatEditMode()
+            } else {
+                Toast.makeText(this, "悬浮窗尚未打开；此按钮不会启动触屏接管", Toast.LENGTH_SHORT).show()
+            }
+        })
         launchCard.addView(guideText)
         container.addView(launchCard, cardLayoutParams())
 
