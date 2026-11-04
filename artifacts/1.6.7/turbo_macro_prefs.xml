@@ -1,4 +1,0 @@
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-<string name="active_profile">{&quot;name&quot;:&quot;限时多指验证&quot;,&quot;loopWhileHeld&quot;:true,&quot;enableHaptics&quot;:false,&quot;enableRipple&quot;:false,&quot;triggerAlpha&quot;:0.6499999761581421,&quot;triggerSizeDp&quot;:54,&quot;triggerX&quot;:160,&quot;triggerY&quot;:760,&quot;steps&quot;:[{&quot;id&quot;:1,&quot;type&quot;:&quot;TAP&quot;,&quot;x&quot;:939,&quot;y&quot;:1227,&quot;endX&quot;:939,&quot;endY&quot;:1227,&quot;holdDurationMs&quot;:20,&quot;intervalAfterMs&quot;:500,&quot;jitterRadiusPx&quot;:0}]}</string>
-</map>
