@@ -37,6 +37,8 @@ class TouchMuxClient(private val appContext: Context) {
     private var remoteProcess: Any? = null
     private var writer: BufferedWriter? = null
     private var reader: BufferedReader? = null
+    private var errorReader: BufferedReader? = null
+    private var processError: AtomicReference<String?> = AtomicReference(null)
     private val ioExecutor = Executors.newSingleThreadExecutor { r ->
         Thread(r, "touchmux-io").apply { isDaemon = true }
     }
@@ -47,7 +49,7 @@ class TouchMuxClient(private val appContext: Context) {
 
     fun isMerging(): Boolean = merging.get()
 
-    fun lastError(): String? = lastError.get()
+    fun lastError(): String? = lastError.get() ?: processError.get()
 
     fun isShizukuReady(): Boolean {
         return try {
@@ -146,23 +148,14 @@ class TouchMuxClient(private val appContext: Context) {
                 }
                 found
             }
-        } ?: return if (cached.exists() && cached.length() > 8_000L) cached else null
+        } ?: return null
 
-        return try {
-            if (!cached.exists() || cached.length() != source.length() ||
-                cached.lastModified() < source.lastModified()
-            ) {
-                source.inputStream().use { inp ->
-                    cached.outputStream().use { out -> inp.copyTo(out) }
-                }
-            }
-            cached.setReadable(true, false)
-            cached.setExecutable(true, false)
-            cached
-        } catch (e: Throwable) {
-            Log.w(TAG, "cache copy failed, using source: ${e.message}")
-            source.setExecutable(true, false)
-            source
+        // 重要：不要把可执行文件放到 app 私有 filesDir 后再交给 Shizuku shell。
+        // shell uid 通常无法穿过 /data/user/0/<package> 的目录权限，表现为 start:null。
+        // 直接执行 nativeLibraryDir 中由系统解压、可被 shell 读取的副本。
+        return source.apply {
+            setReadable(true, false)
+            setExecutable(true, false)
         }
     }
 
@@ -196,11 +189,22 @@ class TouchMuxClient(private val appContext: Context) {
 
             reader = BufferedReader(InputStreamReader(input))
             writer = BufferedWriter(OutputStreamWriter(output))
+            val errorMethod = remote.javaClass.methods.firstOrNull {
+                it.name == "getErrorStream" && it.parameterTypes.isEmpty()
+            }
+            errorReader = (errorMethod?.invoke(remote) as? java.io.InputStream)?.let {
+                BufferedReader(InputStreamReader(it))
+            }
+            processError.set(null)
             remoteProcess = remote
 
             val readyLine = readLineLimited(5000L)
+            if (readyLine == null) {
+                val detail = readErrorSnapshot()
+                lastError.set(detail ?: "start:null")
+            }
             if (readyLine == null || !readyLine.startsWith("OK READY")) {
-                lastError.set(readyLine ?: "helper_no_ready")
+                lastError.set(readErrorSnapshot() ?: readyLine ?: "helper_no_ready")
                 destroyProcessLocked()
                 return false
             }
@@ -210,6 +214,19 @@ class TouchMuxClient(private val appContext: Context) {
             lastError.set("start:${e.message}")
             destroyProcessLocked()
             false
+        }
+    }
+
+    private fun readErrorSnapshot(): String? {
+        val r = errorReader ?: return null
+        return try {
+            val parts = mutableListOf<String>()
+            while (r.ready() && parts.size < 4) {
+                r.readLine()?.trim()?.takeIf { it.isNotEmpty() }?.let(parts::add)
+            }
+            parts.joinToString(" | ").takeIf { it.isNotBlank() }
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -279,6 +296,7 @@ class TouchMuxClient(private val appContext: Context) {
         }
         writer = null
         reader = null
+        errorReader = null
         val remote = remoteProcess
         remoteProcess = null
         merging.set(false)
