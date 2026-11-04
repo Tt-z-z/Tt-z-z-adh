@@ -43,12 +43,12 @@
 2. 分离真人当前 slot 与输出 slot，宏事件后真人省略 SLOT 时仍恢复正确槽位。
 3. 真人 tracking ID 重映射至 0..65534，宏独占 65535。
 4. SYN_DROPPED、读写错误等 fail-closed，释放抓取并销毁虚拟设备。
-5. `--diagnostic-seconds 1..15` 是不可被 PING 延长的内部硬期限；外层 Android `timeout -k 1s 17s` 提供额外强制退出。
+5. `--diagnostic-seconds 1..600` 是不可被 PING 延长的内部硬期限；当前 1.6.9 使用 600 秒会话，外层 Android `timeout -k 1s 602s` 提供额外强制退出。
 6. 新增 `CANCEL_TAP`，回复 `OK CANCEL_TAP`。只取消宏，不调用 RELEASE、不释放真人合并。如果真人帧尚未结束，宏 UP 延后至下一 SYN 边界，避免在半帧中插入 SYN_REPORT。未发送的宏 DOWN 直接取消；重复取消幂等。
 
 `TouchMuxClient.kt`：
 - 从 `applicationInfo.nativeLibraryDir` 执行 helper；不能复制到 app 私有 filesDir 后让 Shizuku shell 执行（shell 无法穿越私有目录，曾报 start:null）。
-- 当前验证版启动参数包括外层 timeout 和内部 15 秒期限；不应自动无限重启接管。
+- 当前 1.6.9 验证版启动参数包括外层 timeout 和内部 600 秒期限；不应自动无限重启接管。
 - `cancelTapAsync()` 后台串行取消，pendingCancels 阻止新 TAP 越过尚未完成的取消；tap 获取锁后再次检查 allowed 回调。
 - 销毁远端进程后再关闭阻塞读流，避免 release/QUIT 同步写造成死锁。
 
@@ -196,7 +196,7 @@ gh run list --branch fix/touchmux-validation --limit 3
 - 取消与新 TAP 的竞态、pending cancel 期间快速重按、异常下资源释放仍需专项测试；host C 测试不覆盖 Kotlin 生命周期。
 - 悬浮按钮三击编辑手势可能与快速重复触发冲突。
 - MainActivity 仍有旧文案建议无障碍和声称多指不受影响，需要改成实际验证范围，诊断包还移除了无障碍 service。
-- 当前 15 秒到期不能自动重新抓屏；需用户明确重新启动。到期 UI 提示应更清楚。
+- 当前 600 秒到期不能自动重新抓屏；需用户明确重新启动。到期 UI 提示应更清楚。
 - Android 跨窗口 split touch 与同页多指不同，尚未验收。
 - 需要固定 CI 调试签名，防止每次重装丢授权/配置。
 - 当前 debug 清单保留显式 MainActivity 和 ShizukuProvider，launcher 仅诊断页，避免默认启动宏。

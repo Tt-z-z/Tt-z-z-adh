@@ -29,6 +29,8 @@ class TouchMuxClient(private val appContext: Context) {
     companion object {
         private const val TAG = "TouchMuxClient"
         private const val LIB_NAME = "libtouchmux.so"
+        private const val SESSION_LIMIT_SECONDS = 10 * 60
+        private const val OUTER_TIMEOUT_SECONDS = SESSION_LIMIT_SECONDS + 2
     }
 
     private val lock = ReentrantLock()
@@ -49,10 +51,11 @@ class TouchMuxClient(private val appContext: Context) {
     }
 
     @Volatile private var diagnosticStartedAt = 0L
+    private var engagedGeometry: Triple<Int, Int, Int>? = null
 
     fun diagnosticRemainingSeconds(): Int {
         if (diagnosticStartedAt == 0L) return 0
-        val remaining = 15_000L - (android.os.SystemClock.elapsedRealtime() - diagnosticStartedAt)
+        val remaining = SESSION_LIMIT_SECONDS * 1000L - (android.os.SystemClock.elapsedRealtime() - diagnosticStartedAt)
         return ((remaining.coerceAtLeast(0L) + 999L) / 1000L).toInt()
     }
 
@@ -88,8 +91,13 @@ class TouchMuxClient(private val appContext: Context) {
             }
             if (merging.get() && remoteProcess != null) return true
             if (!startProcessLocked()) return false
-            val (w, h) = displaySize()
-            val resp = sendAndWaitLocked("ENGAGE $w $h", timeoutMs = 6000L) ?: run {
+            val geometry = displayGeometry()
+            engagedGeometry = geometry
+            val (w, h, rotation) = geometry
+            val sideways = rotation == 1 || rotation == 3
+            val naturalW = if (sideways) h else w
+            val naturalH = if (sideways) w else h
+            val resp = sendAndWaitLocked("ENGAGE $naturalW $naturalH", timeoutMs = 6000L) ?: run {
                 merging.set(false)
                 lastError.set("engage_timeout")
                 destroyProcessLocked()
@@ -140,8 +148,26 @@ class TouchMuxClient(private val appContext: Context) {
                 trace("TAP_REJECT status=${diagnosticStatus()} pendingCancels=${pendingCancels.get()}")
                 return false
             }
-            trace("TAP_REQUEST x=$x y=$y holdMs=$holdMs")
-            val resp = sendAndWaitLocked("TAP $x $y $holdMs", timeoutMs = 350L)
+            val geometry = displayGeometry()
+            if (geometry != engagedGeometry) {
+                lastError.set("display_changed_restart_required")
+                destroyProcessLocked()
+                return false
+            }
+            val (w, h, rotation) = geometry
+            if (x !in 0 until w || y !in 0 until h) {
+                lastError.set("target_out_of_bounds")
+                return false
+            }
+            // Invert InputReader's viewport rotation: uinput uses natural panel axes.
+            val (nativeX, nativeY) = when (rotation) {
+                1 -> (h - 1 - y) to x
+                2 -> (w - 1 - x) to (h - 1 - y)
+                3 -> y to (w - 1 - x)
+                else -> x to y
+            }
+            trace("TAP_REQUEST x=$x y=$y nativeX=$nativeX nativeY=$nativeY rotation=$rotation holdMs=$holdMs")
+            val resp = sendAndWaitLocked("TAP $nativeX $nativeY $holdMs", timeoutMs = 350L)
             trace("TAP_ACK response=$resp")
             if (resp == null) return false
             if (resp.startsWith("OK")) return true
@@ -159,16 +185,16 @@ class TouchMuxClient(private val appContext: Context) {
         }
     }
 
-    private fun displaySize(): Pair<Int, Int> {
+    private fun displayGeometry(): Triple<Int, Int, Int> {
         val wm = appContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
         return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             val b = wm.currentWindowMetrics.bounds
-            b.width() to b.height()
+            Triple(b.width(), b.height(), wm.defaultDisplay.rotation)
         } else {
             val dm = android.util.DisplayMetrics()
             @Suppress("DEPRECATION")
             wm.defaultDisplay.getRealMetrics(dm)
-            dm.widthPixels to dm.heightPixels
+            Triple(dm.widthPixels, dm.heightPixels, wm.defaultDisplay.rotation)
         }
     }
 
@@ -230,8 +256,8 @@ class TouchMuxClient(private val appContext: Context) {
             )
             method.isAccessible = true
             diagnosticStartedAt = android.os.SystemClock.elapsedRealtime()
-            trace("HELPER_START budgetMs=15000")
-            val remote = method.invoke(null, arrayOf("/system/bin/timeout", "-k", "1s", "17s", bin.absolutePath, "--diagnostic-seconds", "15"), null, null)
+            trace("HELPER_START budgetMs=${SESSION_LIMIT_SECONDS * 1000L}")
+            val remote = method.invoke(null, arrayOf("/system/bin/timeout", "-k", "1s", "${OUTER_TIMEOUT_SECONDS}s", bin.absolutePath, "--diagnostic-seconds", SESSION_LIMIT_SECONDS.toString()), null, null)
                 ?: return false.also { lastError.set("newProcess_null") }
 
             remoteProcess = remote
