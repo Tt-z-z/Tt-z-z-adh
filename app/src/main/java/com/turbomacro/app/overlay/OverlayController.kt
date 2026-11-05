@@ -184,8 +184,15 @@ class OverlayController private constructor(
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = currentProfile.triggerX
-            y = currentProfile.triggerY
+            val safePosition = clampTriggerPosition(
+                currentProfile.triggerX,
+                currentProfile.triggerY,
+                sizePx,
+            )
+            x = safePosition.first
+            y = safePosition.second
+            currentProfile.triggerX = x
+            currentProfile.triggerY = y
             applyCutoutShortEdges(this)
         }
 
@@ -207,8 +214,13 @@ class OverlayController private constructor(
                 macroEngine.onTriggerReleaseUp(currentProfile)
             },
             onDragMoved = { dx, dy ->
-                triggerLp.x = (triggerLp.x + dx).coerceAtLeast(0)
-                triggerLp.y = (triggerLp.y + dy).coerceAtLeast(0)
+                val next = clampTriggerPosition(
+                    triggerLp.x + dx,
+                    triggerLp.y + dy,
+                    triggerLp.width,
+                )
+                triggerLp.x = next.first
+                triggerLp.y = next.second
                 currentProfile.triggerX = triggerLp.x
                 currentProfile.triggerY = triggerLp.y
                 repository.saveProfile(currentProfile)
@@ -747,6 +759,21 @@ class OverlayController private constructor(
             windowManager.removeView(view)
         } catch (_: Throwable) {
         }
+    }
+
+    private fun clampTriggerPosition(x: Int, y: Int, sizePx: Int): Pair<Int, Int> {
+        val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val bounds = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            wm.currentWindowMetrics.bounds
+        } else {
+            val metrics = android.util.DisplayMetrics()
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay.getRealMetrics(metrics)
+            android.graphics.Rect(0, 0, metrics.widthPixels, metrics.heightPixels)
+        }
+        val maxX = (bounds.width() - sizePx).coerceAtLeast(0)
+        val maxY = (bounds.height() - sizePx).coerceAtLeast(0)
+        return x.coerceIn(0, maxX) to y.coerceIn(0, maxY)
     }
 
     private fun dpToPx(dp: Int): Int {
